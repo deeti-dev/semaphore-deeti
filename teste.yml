@@ -1,0 +1,24 @@
+---
+- name: Verificar atualizações no Windows Server
+  hosts: ws2k12  # Defina seu grupo de servidores ou o IP do servidor
+  gather_facts: no        # Não é necessário coletar fatos se você estiver apenas verificando atualizações
+
+  tasks:
+    - name: Verificar atualizações pendentes
+      win_updates:
+        state: searched  # Apenas pesquisa por atualizações, não instala
+      register: update_result  # Armazena os resultados
+
+    - name: Exibir as atualizações encontradas
+      debug:
+        var: update_result.updates  # Exibe a lista de atualizações pendentes
+
+    - name: Verificar se há atualizações falhadas
+      debug:
+        msg: "Atualizações falhadas: {{ update_result.failed_update_count }}"
+      when: update_result.failed_update_count > 0
+
+    - name: Verificar se há atualizações encontradas
+      debug:
+        msg: "Foram encontradas as seguintes atualizações: {{ update_result.found_update_count }}"
+      when: update_result.found_update_count > 0

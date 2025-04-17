@@ -1,0 +1,24 @@
+---
+- name: Verificar atualizações nas máquinas dos colaboradores
+  hosts: ws2k19  # Altere para o grupo de máquinas de colaboradores no seu inventário
+  gather_facts: no  # Não coletamos fatos, já que estamos apenas verificando atualizações
+
+  tasks:
+    - name: Verificar atualizações pendentes
+      win_updates:
+        state: searched  # Apenas pesquisa as atualizações, sem instalá-las
+      register: update_result  # Armazenamos o resultado em uma variável
+
+    - name: Exibir as atualizações encontradas
+      debug:
+        var: update_result.updates  # Exibe as atualizações encontradas
+
+    - name: Verificar se há atualizações falhadas
+      debug:
+        msg: "Atualizações falhadas: {{ update_result.failed_update_count }}"
+      when: update_result.failed_update_count > 0  # Se houver falhas, mostra o número
+
+    - name: Verificar se há atualizações encontradas
+      debug:
+        msg: "Foram encontradas as seguintes atualizações: {{ update_result.found_update_count }}"
+      when: update_result.found_update_count > 0  # Se houver atualizações encontradas, mostra o número

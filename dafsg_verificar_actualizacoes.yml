@@ -1,24 +1,83 @@
 ---
-- name: Verificar atualizações nas máquinas dos colaboradores
-  hosts: dafsg  # Altere para o grupo de máquinas de colaboradores no seu inventário
-  gather_facts: no  # Não coletamos fatos, já que estamos apenas verificando atualizações
-
+- name: Verificar e instalar atualizações do sistema e das aplicações
+  hosts:
+    - dafsg
+    # - daca
+  gather_facts: yes
   tasks:
-    - name: Verificar atualizações pendentes
+    # Verificar atualizações do sistema
+    - name: Verificar atualizações do sistema
       win_updates:
-        state: searched  # Apenas pesquisa as atualizações, sem instalá-las
-      register: update_result  # Armazenamos o resultado em uma variável
+        category_names:
+          - SecurityUpdates
+        state: searched
+      register: updates_system
 
-    - name: Exibir as atualizações encontradas
-      debug:
-        var: update_result.updates  # Exibe as atualizações encontradas
+    #Instala as actualizaçoes disponíveis para o sistema
+    - name: Instalar atualizações do sistema
+      win_updates:
+        category_names:
+          - SecurityUpdates
+        state: installed
+      when: updates_system.found_update_count > 0
+      register: installed_updates_system
 
-    - name: Verificar se há atualizações falhadas
-      debug:
-        msg: "Atualizações falhadas: {{ update_result.failed_update_count }}"
-      when: update_result.failed_update_count > 0  # Se houver falhas, mostra o número
+    # Atualizar todos os pacotes instalados via Chocolatey
+    - name: Atualizar todos os pacotes Chocolatey
+      win_command: choco upgrade all -y
+      register: choco_updates
+      ignore_errors: yes  # Ignorar erros, caso algum pacote não seja atualizado
 
-    - name: Verificar se há atualizações encontradas
+    # Verificar se o winget está disponível
+    - name: Verificar se winget está disponível
+      win_command: where winget
+      register: winget_check
+      ignore_errors: yes
+
+     # Listar as atualizações dos pacotes com winget
+    - name: Listar pacotes desatualizados com winget
+      win_command: winget upgrade
+      register: winget_updates
+      become: yes  # Garantir permissões administrativas
+      when: winget_check.rc == 0
+      ignore_errors: yes  # Ignorar erros caso o winget não consiga encontrar pacotes
+
+    # Exibir pacotes desatualizados com winget
+    - name: Exibir pacotes desatualizados com winget
       debug:
-        msg: "Foram encontradas as seguintes atualizações: {{ update_result.found_update_count }}"
-      when: update_result.found_update_count > 0  # Se houver atualizações encontradas, mostra o número
+        msg: "Pacotes desatualizados com winget: {{ winget_updates.stdout }}"
+      when: winget_updates.stdout != ""
+
+     # Atualizar pacotes com winget
+    - name: Atualizar pacotes com winget
+      win_command: winget upgrade --all
+      register: winget_upgrade
+      become: yes  # Garantir permissões administrativas
+      when: winget_updates.stdout != ""  # Só faz upgrade se houver pacotes desatualizados
+      ignore_errors: yes  # Ignorar erros caso o winget não consiga encontrar pacotes
+
+    # Exibir as atualizações instaladas
+    - name: Exibir as atualizações instaladas
+      debug:
+        msg:
+          - "Atualizações instaladas: {{ installed_updates_system }}"
+      when: installed_updates_system is defined
+
+    #Verifica se um reboot nas máquinas é necessário
+    - name: Verificar se é necessário reboot
+      win_reboot:
+        reboot_timeout: 600  # Aguarda até 10 minutos
+        test_command: "echo Reboot needed"
+      when: updates_system.reboot_required == true
+      register: reboot_required
+
+    #Informa se um reboot é necessário após as actualizações
+    - name: Informar se o reboot é necessário
+      debug:
+        msg: "Reboot necessário após as atualizações"
+      when: reboot_required.changed == true
+
+    # Reboot se necessário após as atualizações do sistema
+    #- name: Reboot se necessário
+      #win_reboot:
+      #when: updates_system.reboot_required

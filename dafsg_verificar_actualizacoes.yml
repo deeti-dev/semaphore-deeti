@@ -14,13 +14,13 @@
       register: updates_system
 
     #Instala as actualizaçoes disponíveis para o sistema
-    - name: Instalar atualizações do sistema
-      win_updates:
-        category_names:
-          - SecurityUpdates
-        state: installed
-      when: updates_system.found_update_count > 0
-      register: installed_updates_system
+    #- name: Instalar atualizações do sistema
+      #win_updates:
+        #category_names:
+          #- SecurityUpdates
+        #state: installed
+      #when: updates_system.found_update_count > 0
+      #register: installed_updates_system
 
     # Atualizar todos os pacotes instalados via Chocolatey
     - name: Atualizar todos os pacotes Chocolatey
@@ -49,12 +49,12 @@
       when: winget_updates.stdout != ""
 
      # Atualizar pacotes com winget
-    - name: Atualizar pacotes com winget
-      win_command: winget upgrade --all
-      register: winget_upgrade
-      become: yes  # Garantir permissões administrativas
-      when: winget_updates.stdout != ""  # Só faz upgrade se houver pacotes desatualizados
-      ignore_errors: yes  # Ignorar erros caso o winget não consiga encontrar pacotes
+    #- name: Atualizar pacotes com winget
+      #win_command: winget upgrade --all
+      #register: winget_upgrade
+      #become: yes  # Garantir permissões administrativas
+      #when: winget_updates.stdout != ""  # Só faz upgrade se houver pacotes desatualizados
+      #ignore_errors: yes  # Ignorar erros caso o winget não consiga encontrar pacotes
 
     # Exibir as atualizações instaladas
     - name: Exibir as atualizações instaladas

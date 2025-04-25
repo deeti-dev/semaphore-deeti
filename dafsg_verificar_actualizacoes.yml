@@ -36,9 +36,9 @@
 
      # Listar as atualizações dos pacotes com winget
     - name: Listar pacotes desatualizados com winget
-      win_command: winget upgrade
+      win_command: winget upgrade --accept-package-agreements --accept-package-agreements -h --disable-interactivity
       register: winget_updates
-      become: yes  # Garantir permissões administrativas
+      become: no  # Garantir permissões administrativas
       when: winget_check.rc == 0
       ignore_errors: yes  # Ignorar erros caso o winget não consiga encontrar pacotes
 
@@ -50,7 +50,7 @@
 
      # Atualizar pacotes com winget
     #- name: Atualizar pacotes com winget
-      #win_command: winget upgrade --all
+      #win_command: winget upgrade --all --accept-package-agreements --accept-package-agreements -h --disable-interactivity
       #register: winget_upgrade
       #become: yes  # Garantir permissões administrativas
       #when: winget_updates.stdout != ""  # Só faz upgrade se houver pacotes desatualizados

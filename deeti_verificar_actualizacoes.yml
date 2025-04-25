@@ -9,6 +9,7 @@
       win_updates:
         category_names:
           - SecurityUpdates
+          - CriticalUpdates
         state: searched
       register: updates_system
 

@@ -63,18 +63,18 @@
       when: installed_updates_system is defined
 
     #Verifica se um reboot nas máquinas é necessário
-    - name: Verificar se é necessário reboot
-      win_reboot:
-        reboot_timeout: 600  # Aguarda até 10 minutos
-        test_command: "echo Reboot needed"
-      when: updates_system.reboot_required == true
-      register: reboot_required
+    #- name: Verificar se é necessário reboot
+      #win_reboot:
+        #reboot_timeout: 600  # Aguarda até 10 minutos
+        #test_command: "echo Reboot needed"
+      #when: updates_system.reboot_required == true
+      #register: reboot_required
 
     #Informa se um reboot é necessário após as actualizações
-    - name: Informar se o reboot é necessário
-      debug:
-        msg: "Reboot necessário após as atualizações"
-      when: reboot_required.changed == true
+    #- name: Informar se o reboot é necessário
+      #debug:
+        #msg: "Reboot necessário após as atualizações"
+      #when: reboot_required.changed == true
 
     # Reboot se necessário após as atualizações do sistema
     #- name: Reboot se necessário

@@ -10,6 +10,7 @@
       win_updates:
         category_names:
           - SecurityUpdates
+          - CriticalUpdates
         state: searched
       register: updates_system
 
@@ -36,7 +37,7 @@
 
      # Listar as atualizações dos pacotes com winget
     - name: Listar pacotes desatualizados com winget
-      win_command: winget upgrade --accept-package-agreements --accept-package-agreements -h --disable-interactivity
+      win_command: winget upgrade
       register: winget_updates
       become: no  # Garantir permissões administrativas
       when: winget_check.rc == 0

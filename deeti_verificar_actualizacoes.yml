@@ -49,12 +49,12 @@
       when: winget_updates.stdout != ""
 
      # Atualizar pacotes com winget
-    #- name: Atualizar pacotes com winget
-      #win_command: winget upgrade --all --accept-package-agreements --accept-package-agreements -h --disable-interactivity
-      #register: winget_upgrade
-      #become: yes  # Garantir permissões administrativas
-      #when: winget_updates.stdout != ""  # Só faz upgrade se houver pacotes desatualizados
-      #ignore_errors: yes  # Ignorar erros caso o winget não consiga encontrar pacotes
+    - name: Atualizar pacotes com winget
+      win_command: winget upgrade --all --accept-package-agreements --accept-package-agreements --silent --disable-interactivity --unknown --uninstall-previous
+      register: winget_upgrade
+      become: yes  # Garantir permissões administrativas
+      when: winget_updates.stdout != ""  # Só faz upgrade se houver pacotes desatualizados
+      ignore_errors: yes  # Ignorar erros caso o winget não consiga encontrar pacotes
 
     # Exibir as atualizações instaladas
     - name: Exibir as atualizações instaladas
@@ -62,22 +62,3 @@
         msg:
           - "Atualizações instaladas: {{ installed_updates_system }}"
       when: installed_updates_system is defined
-
-    #Verifica se um reboot nas máquinas é necessário
-    #- name: Verificar se é necessário reboot
-      #win_reboot:
-        #reboot_timeout: 600  # Aguarda até 10 minutos
-        #test_command: "echo Reboot needed"
-      #when: updates_system.reboot_required == true
-      #register: reboot_required
-
-    #Informa se um reboot é necessário após as actualizações
-    #- name: Informar se o reboot é necessário
-      #debug:
-        #msg: "Reboot necessário após as atualizações"
-      #when: reboot_required.changed == true
-
-    # Reboot se necessário após as atualizações do sistema
-    #- name: Reboot se necessário
-      #win_reboot:
-      #when: updates_system.reboot_required

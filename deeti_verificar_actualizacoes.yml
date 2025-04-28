@@ -50,7 +50,7 @@
 
      # Atualizar pacotes com winget
     - name: Atualizar pacotes com winget
-      win_command: winget upgrade --all --accept-package-agreements --accept-source-agreements --silent --disable-interactivity --unknown --uninstall-previous
+      win_command: winget upgrade --all --accept-package-agreements --accept-source-agreements --silent --disable-interactivity --unknown --uninstall-previous --nowarn --force
       register: winget_upgrade
       when: winget_updates.stdout != ""  # Só faz upgrade se houver pacotes desatualizados
       ignore_errors: yes  # Ignorar erros caso o winget não consiga encontrar pacotes

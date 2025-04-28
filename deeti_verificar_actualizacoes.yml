@@ -52,7 +52,6 @@
     - name: Atualizar pacotes com winget
       win_command: winget upgrade --all --accept-package-agreements --accept-package-agreements --silent --disable-interactivity --unknown --uninstall-previous
       register: winget_upgrade
-      become: yes  # Garantir permissões administrativas
       when: winget_updates.stdout != ""  # Só faz upgrade se houver pacotes desatualizados
       ignore_errors: yes  # Ignorar erros caso o winget não consiga encontrar pacotes
 

@@ -1,0 +1,15 @@
+---
+- name: Verificar os processos que consomem mais RAM no Windows
+  hosts:
+    - windows11  # Substitua com o nome do seu grupo de hosts
+  gather_facts: no
+  tasks:
+    - name: Listar processos que consomem mais memória
+      win_powershell:
+        script: |
+          Get-Process | Sort-Object -Property WorkingSet -Descending | Select-Object -First 10 Name, Id, @{Name="RAM(GB)";Expression={[math]::round($_.WorkingSet/1GB,2)}} | Format-Table -AutoSize
+      register: high_memory_processes
+
+    - name: Exibir processos que mais consomem RAM
+      debug:
+        msg: "{{ high_memory_processes.stdout }}"

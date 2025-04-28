@@ -1,7 +1,7 @@
 ---
 - name: Verificar os processos que consomem mais RAM no Windows
   hosts:
-    - windows11  # Substitua com o nome do seu grupo de hosts
+    - deeti  # Substitua com o nome do seu grupo de hosts
   gather_facts: no
   tasks:
     - name: Listar processos que consomem mais memória

@@ -1,0 +1,19 @@
+---
+- name: Verificar processos que consomem mais disco
+  hosts:
+    - deeti
+  gather_facts: yes
+  tasks:
+    - name: Listar processos que consomem mais disco, excluindo o svchost
+      win_shell: |
+        Get-Process | Where-Object { $_.Name -ne 'svchost' } | 
+        Select-Object Name, 
+                       @{Name="Read MB";Expression={[math]::round($_.IOReadBytes / 1MB, 3)}}, 
+                       @{Name="Write MB";Expression={[math]::round($_.IOWriteBytes / 1MB, 3)}} | 
+        Sort-Object "Read MB" -Descending | 
+        Select-Object -First 20
+      register: processes_disk_usage
+
+    - name: Exibir os processos que consomem mais disco
+      debug:
+        msg: "{{ processes_disk_usage.stdout }}"

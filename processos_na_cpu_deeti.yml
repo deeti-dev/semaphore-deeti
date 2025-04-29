@@ -1,19 +1,22 @@
 ---
-- name: Verificar processos que consomem mais CPU
+- name: Verificar processos que estão a consumir mais CPU
   hosts:
     - deeti
   gather_facts: yes
-  ignore_unreachable: yes  # Ignora hosts inacessíveis
+  ignore_unreachable: yes  # Ignorar hosts inacessíveis
   tasks:
-    - name: Listar processos que consomem mais CPU, excluindo o svchost
+    - name: Listar os processos que consomem mais CPU (excluindo svchost)
       win_shell: |
-        Get-Process | Where-Object { $_.Name -ne 'svchost' } | 
+        Get-Process | Where-Object { $_.Name -ne 'svchost' } |
         Select-Object Name, 
-                       @{Name="CPU %";Expression={[math]::round($_.CPU, 3)}} | 
-        Sort-Object "CPU %" -Descending | 
+                       @{Name="CPU %";Expression={[math]::round(($_.CPU / (Get-WmiObject Win32_Processor | Select-Object -ExpandProperty NumberOfCores) / (Get-WmiObject Win32_OperatingSystem | Select-Object -ExpandProperty TotalVisibleMemorySize) * 100), 2)}} |
+        Sort-Object "CPU %" -Descending |
         Select-Object -First 20
-      register: processes_cpu_usage
+      register: process_cpu
+      ignore_errors: yes
 
     - name: Exibir os processos que consomem mais CPU
       debug:
-        msg: "{{ processes_cpu_usage.stdout }}"
+        msg: "Processos que consomem mais CPU: {{ process_cpu.stdout }}"
+      when: process_cpu.stdout != ""
+

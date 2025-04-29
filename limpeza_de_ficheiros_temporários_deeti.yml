@@ -7,8 +7,8 @@
   tasks:
     - name: Obter caminho do diretório %temp%
       win_shell: |
-        $tempPath = [System.IO.Path]::GetTempPath()
-        $tempPath.Trim()
+        $tempPath = [System.IO.Path]::GetTempPath().Trim()
+        $tempPath
       register: temp_directory
       ignore_errors: yes
 

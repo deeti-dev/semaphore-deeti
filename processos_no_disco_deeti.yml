@@ -3,6 +3,7 @@
   hosts:
     - deeti
   gather_facts: yes
+  ignore_unreachable: yes  # Ignora hosts inacessíveis
   tasks:
     - name: Listar processos que consomem mais disco, excluindo o svchost
       win_shell: |

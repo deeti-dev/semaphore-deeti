@@ -10,7 +10,7 @@
         Get-NetTCPConnection | 
         Group-Object -Property OwningProcess | 
         Sort-Object Count -Descending | 
-        Select-Object -First 10 |
+        Select-Object -First 20 |
         ForEach-Object {
           $processId = $_.Name
           $processName = (Get-Process -Id $processId).Name

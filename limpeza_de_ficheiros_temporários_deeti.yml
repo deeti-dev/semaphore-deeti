@@ -1,35 +1,45 @@
 ---
 - name: Limpar arquivos temporários no %temp% e obter o tamanho da pasta
-  hosts:
-    - deeti
+  hosts: deeti
   gather_facts: yes
-  ignore_unreachable: yes  # Ignorar hosts inacessíveis
+  ignore_unreachable: yes
   tasks:
     - name: Obter caminho do diretório %temp%
       win_shell: |
         $tempPath = [System.IO.Path]::GetTempPath().Trim()
-        $tempPath
+        Write-Output $tempPath
       register: temp_directory
       ignore_errors: yes
 
     - name: Calcular o tamanho da pasta %temp% em GB
       win_shell: |
-        $tempDir = "{{ temp_directory.stdout }}";
-        $totalSize = (Get-ChildItem -Path $tempDir -Recurse | Measure-Object -Property Length -Sum).Sum
-        [math]::round($totalSize / 1GB, 2)
+        $tempDir = "{{ temp_directory.stdout | trim }}";
+        $totalSize = (Get-ChildItem -Path $tempDir -Recurse -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+        if ($totalSize -eq $null) { Write-Output "0" } else { [math]::Round($totalSize / 1GB, 2) }
       register: temp_size_gb
       ignore_errors: yes
 
     - name: Exibir o tamanho da pasta %temp%
       debug:
-        msg: "Tamanho da pasta %temp%: {{ temp_size_gb.stdout }} GB"
+        msg: "Tamanho da pasta %temp%: {{ temp_size_gb.stdout | trim }} GB"
+      when: temp_size_gb.rc == 0
 
     - name: Deletar arquivos no diretório %temp%
       win_shell: |
-        $tempDir = "{{ temp_directory.stdout }}";
-        Get-ChildItem -Path $tempDir -Recurse | Remove-Item -Force -ErrorAction SilentlyContinue
+        $tempDir = "{{ temp_directory.stdout | trim }}";
+        Get-ChildItem -Path $tempDir -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+      register: temp_cleanup
       ignore_errors: yes
 
-    - name: Informar se o diretório %temp% foi limpo
+    - name: Calcular o tamanho da pasta %temp% após limpeza
+      win_shell: |
+        $tempDir = "{{ temp_directory.stdout | trim }}";
+        $totalSize = (Get-ChildItem -Path $tempDir -Recurse -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+        if ($totalSize -eq $null) { Write-Output "0" } else { [math]::Round($totalSize / 1GB, 2) }
+      register: temp_size_after_cleanup
+      ignore_errors: yes
+
+    - name: Informar resultado da limpeza
       debug:
-        msg: "Os arquivos na pasta %temp% foram excluídos com sucesso."
+        msg: "Limpeza da pasta %temp% concluída. Tamanho antes: {{ temp_size_gb.stdout | trim }} GB, Tamanho depois: {{ temp_size_after_cleanup.stdout | trim }} GB"
+      when: temp_cleanup.rc == 0 and temp_size_after_cleanup.rc == 0

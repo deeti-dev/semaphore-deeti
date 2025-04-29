@@ -4,6 +4,7 @@
     - dafsg
     # - daca
   gather_facts: yes
+  ignore_unreachable: yes  # Ignora hosts inacessíveis
   tasks:
     # Verificar atualizações do sistema
     - name: Verificar atualizações do sistema

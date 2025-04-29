@@ -1,0 +1,32 @@
+---
+- name: Limpar arquivos temporários no %temp%
+  hosts:
+    - deeti
+  gather_facts: yes
+  ignore_unreachable: yes  # Ignorar hosts inacessíveis
+  tasks:
+    - name: Obter caminho do diretório %temp%
+      win_shell: |
+        [System.IO.Path]::GetTempPath()
+      register: temp_directory
+      ignore_errors: yes
+
+    - name: Listar arquivos no diretório %temp%
+      win_find:
+        paths: "{{ temp_directory.stdout }}"
+        recurse: yes
+      register: temp_files
+      ignore_errors: yes
+
+    - name: Deletar arquivos no diretório %temp%
+      win_file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ temp_files.files }}"
+      ignore_errors: yes
+      when: temp_files.files is defined
+
+    - name: Exibir arquivos deletados
+      debug:
+        msg: "Arquivos deletados: {{ temp_files.files | map(attribute='path') | join(', ') }}"
+      when: temp_files.files is defined

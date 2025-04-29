@@ -1,5 +1,5 @@
 ---
-- name: Limpar arquivos temporários no %temp%
+- name: Limpar arquivos temporários no %temp% e obter o tamanho da pasta
   hosts:
     - deeti
   gather_facts: yes
@@ -11,22 +11,25 @@
       register: temp_directory
       ignore_errors: yes
 
-    - name: Listar arquivos no diretório %temp%
-      win_find:
-        paths: "{{ temp_directory.stdout }}"
-        recurse: yes
-      register: temp_files
+    - name: Calcular o tamanho da pasta %temp% em GB
+      win_shell: |
+        $tempDir = "{{ temp_directory.stdout }}";
+        $totalSize = (Get-ChildItem -Path $tempDir -Recurse | Measure-Object -Property Length -Sum).Sum
+        [math]::round($totalSize / 1GB, 2)
+      register: temp_size_gb
       ignore_errors: yes
+
+    - name: Exibir o tamanho da pasta %temp%
+      debug:
+        msg: "Tamanho da pasta %temp%: {{ temp_size_gb.stdout }} GB"
 
     - name: Deletar arquivos no diretório %temp%
       win_file:
-        path: "{{ item.path }}"
+        path: "{{ temp_directory.stdout }}"
         state: absent
-      loop: "{{ temp_files.files }}"
+      recurse: yes
       ignore_errors: yes
-      when: temp_files.files is defined
 
-    - name: Exibir arquivos deletados
+    - name: Informar se o diretório %temp% foi limpo
       debug:
-        msg: "Arquivos deletados: {{ temp_files.files | map(attribute='path') | join(', ') }}"
-      when: temp_files.files is defined
+        msg: "Os arquivos na pasta %temp% foram excluídos com sucesso."

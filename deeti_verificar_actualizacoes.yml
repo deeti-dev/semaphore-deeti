@@ -1,11 +1,9 @@
 ---
 - name: Verificar e instalar atualizações do sistema e das aplicações
-  hosts:
-    - deeti
+  hosts: deeti
   gather_facts: yes
-  ignore_unreachable: yes  # Ignora hosts inacessíveis
+  ignore_unreachable: yes
   tasks:
-    # Verificar atualizações do sistema
     - name: Verificar atualizações do sistema
       win_updates:
         category_names:
@@ -13,52 +11,47 @@
           - CriticalUpdates
         state: searched
       register: updates_system
+      ignore_errors: yes
 
-    #Instala as actualizaçoes disponíveis para o sistema
-    #- name: Instalar atualizações do sistema
-      #win_updates:
-        #category_names:
-          #- SecurityUpdates
-        #state: installed
-      #when: updates_system.found_update_count > 0
-      #register: installed_updates_system
-
-    # Atualizar todos os pacotes instalados via Chocolatey
     - name: Atualizar todos os pacotes Chocolatey
       win_command: choco upgrade all -y
       register: choco_updates
-      ignore_errors: yes  # Ignorar erros, caso algum pacote não seja atualizado
+      ignore_errors: yes
 
-    # Verificar se o winget está disponível
     - name: Verificar se winget está disponível
       win_command: where winget
       register: winget_check
       ignore_errors: yes
 
-     # Listar as atualizações dos pacotes com winget
     - name: Listar pacotes desatualizados com winget
       win_command: winget upgrade
       register: winget_updates
-      become: no  # Garantir permissões administrativas
+      become: yes
+      become_user: inacom\ansible
       when: winget_check.rc == 0
-      ignore_errors: yes  # Ignorar erros caso o winget não consiga encontrar pacotes
+      ignore_errors: yes
 
-    # Exibir pacotes desatualizados com winget
     - name: Exibir pacotes desatualizados com winget
       debug:
         msg: "Pacotes desatualizados com winget: {{ winget_updates.stdout }}"
       when: winget_updates.stdout != ""
 
-     # Atualizar pacotes com winget
     - name: Atualizar pacotes com winget
-      win_command: winget upgrade --authentication-mode "silent" --authentication-account "inacom\ansible" --all --accept-package-agreements --accept-source-agreements --silent --disable-interactivity --unknown --nowarn --force
+      win_command: winget upgrade --all --accept-package-agreements --accept-source-agreements --silent --force
       register: winget_upgrade
-      when: winget_updates.stdout != ""  # Só faz upgrade se houver pacotes desatualizados
-      ignore_errors: yes  # Ignorar erros caso o winget não consiga encontrar pacotes
+      become: yes
+      become_user: inacom\ansible
+      when: winget_updates.stdout != ""
+      ignore_errors: yes
 
-    # Exibir as atualizações instaladas
-    - name: Exibir as atualizações instaladas
+    - name: Exibir resultado do winget upgrade
+      debug:
+        msg: "Resultado do winget upgrade: {{ winget_upgrade.stdout | default('Nenhum resultado') }}"
+      when: winget_upgrade is defined
+
+    - name: Exibir resumo das atualizações
       debug:
         msg:
-          - "Atualizações instaladas: {{ installed_updates_system }}"
-      when: installed_updates_system is defined
+          - "Atualizações do sistema encontradas: {{ updates_system.found_update_count | default(0) }}"
+          - "Resultado do Chocolatey: {{ choco_updates.stdout | default('Nenhum resultado') }}"
+          - "Resultado do Winget: {{ winget_upgrade.stdout | default('Nenhum resultado') }}"

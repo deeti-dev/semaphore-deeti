@@ -1,0 +1,29 @@
+---
+- name: Verificar processos que estão a consumir mais rede
+  hosts:
+    - deeti
+  gather_facts: yes
+  ignore_unreachable: yes  # Ignorar hosts inacessíveis
+  tasks:
+    - name: Listar os processos que consomem mais rede
+      win_shell: |
+        Get-NetTCPConnection | 
+        Group-Object -Property OwningProcess | 
+        Sort-Object Count -Descending | 
+        Select-Object -First 10 |
+        ForEach-Object {
+          $processId = $_.Name
+          $processName = (Get-Process -Id $processId).Name
+          [PSCustomObject]@{
+            ProcessName = $processName
+            ProcessId = $processId
+            Connections = $_.Count
+          }
+        }
+      register: process_network
+      ignore_errors: yes
+
+    - name: Exibir os processos que consomem mais rede
+      debug:
+        msg: "Processos que consomem mais rede: {{ process_network.stdout }}"
+      when: process_network.stdout != ""

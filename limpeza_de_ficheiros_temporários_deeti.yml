@@ -4,28 +4,41 @@
   gather_facts: yes
   ignore_unreachable: yes
   tasks:
+    - name: Garantir que inacom\ansible está no grupo Administrators
+      win_shell: |
+        Add-LocalGroupMember -Group 'Administrators' -Member 'inacom\ansible' -ErrorAction SilentlyContinue
+      register: admin_group
+      changed_when: admin_group.stdout != ""
+      ignore_errors: yes
+
     - name: Obter lista de diretórios de usuários em C:\Users
       win_shell: |
         $excludedUsers = @('All Users', 'Default', 'Default User', 'KINagSvc', 'Public')
-        $userDirs = Get-ChildItem -Path 'C:\Users' -Directory | Where-Object { $excludedUsers -notcontains $_.Name } | Select-Object -ExpandProperty FullName
-        $userDirs -join ','
+        $userDirs = Get-ChildItem -Path 'C:\Users' -Directory -ErrorAction SilentlyContinue | Where-Object { $excludedUsers -notcontains $_.Name } | Select-Object -ExpandProperty FullName
+        if ($userDirs) { $userDirs -join ',' } else { Write-Output "Nenhum usuário válido encontrado" }
       register: user_directories
       ignore_errors: yes
 
+    - name: Debugar lista de diretórios de usuários
+      debug:
+        msg: "Diretórios de usuários encontrados: {{ user_directories.stdout }}"
+      when: user_directories.rc == 0
+
     - name: Calcular o tamanho total das pastas %temp% em GB
       win_shell: |
-        $userDirs = "{{ user_directories.stdout }}".Split(',')
+        $userDirs = "{{ user_directories.stdout }}".Split(',', [StringSplitOptions]::RemoveEmptyEntries)
         $totalSize = 0
         foreach ($dir in $userDirs) {
-          $tempDir = Join-Path -Path $dir -ChildPath 'AppData\Local\Temp'
+          $tempDir = Join-Path -Path $dir.Trim() -ChildPath 'AppData\Local\Temp'
           if (Test-Path $tempDir) {
-            $size = (Get-ChildItem -Path $tempDir -Recurse -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+            $size = (Get-ChildItem -Path $tempDir -Recurse -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
             if ($size -ne $null) { $totalSize += $size }
           }
         }
         if ($totalSize -eq 0) { Write-Output "0" } else { [math]::Round($totalSize / 1GB, 2) }
       register: temp_size_gb
       ignore_errors: yes
+      when: user_directories.stdout != "Nenhum usuário válido encontrado"
 
     - name: Exibir o tamanho total das pastas %temp%
       debug:
@@ -34,30 +47,32 @@
 
     - name: Deletar arquivos nas pastas %temp% de todos os usuários
       win_shell: |
-        $userDirs = "{{ user_directories.stdout }}".Split(',')
+        $userDirs = "{{ user_directories.stdout }}".Split(',', [StringSplitOptions]::RemoveEmptyEntries)
         foreach ($dir in $userDirs) {
-          $tempDir = Join-Path -Path $dir -ChildPath 'AppData\Local\Temp'
+          $tempDir = Join-Path -Path $dir.Trim() -ChildPath 'AppData\Local\Temp'
           if (Test-Path $tempDir) {
             Get-ChildItem -Path $tempDir -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
           }
         }
       register: temp_cleanup
       ignore_errors: yes
+      when: user_directories.stdout != "Nenhum usuário válido encontrado"
 
     - name: Calcular o tamanho total das pastas %temp% após limpeza
       win_shell: |
-        $userDirs = "{{ user_directories.stdout }}".Split(',')
+        $userDirs = "{{ user_directories.stdout }}".Split(',', [StringSplitOptions]::RemoveEmptyEntries)
         $totalSize = 0
         foreach ($dir in $userDirs) {
-          $tempDir = Join-Path -Path $dir -ChildPath 'AppData\Local\Temp'
+          $tempDir = Join-Path -Path $dir.Trim() -ChildPath 'AppData\Local\Temp'
           if (Test-Path $tempDir) {
-            $size = (Get-ChildItem -Path $tempDir -Recurse -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+            $size = (Get-ChildItem -Path $tempDir -Recurse -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
             if ($size -ne $null) { $totalSize += $size }
           }
         }
         if ($totalSize -eq 0) { Write-Output "0" } else { [math]::Round($totalSize / 1GB, 2) }
       register: temp_size_after_cleanup
       ignore_errors: yes
+      when: user_directories.stdout != "Nenhum usuário válido encontrado"
 
     - name: Informar resultado da limpeza
       debug:

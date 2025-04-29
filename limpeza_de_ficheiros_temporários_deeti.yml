@@ -4,19 +4,6 @@
   gather_facts: yes
   ignore_unreachable: yes
   tasks:
-    - name: Verificar se inacom\ansible está no grupo Administrators
-      win_shell: |
-        $member = Get-LocalGroupMember -Group 'Administrators' -Member 'inacom\ansible' -ErrorAction SilentlyContinue
-        if ($member) { Write-Output 'inacom\ansible já está no grupo Administrators' } else { Write-Output 'inacom\ansible não está no grupo Administrators' }
-      register: admin_check
-      ignore_errors: yes
-
-    - name: Adicionar inacom\ansible ao grupo Administrators se necessário
-      win_shell: |
-        Add-LocalGroupMember -Group 'Administrators' -Member 'inacom\ansible' -ErrorAction SilentlyContinue
-      when: admin_check.stdout is defined and 'não está no grupo Administrators' in admin_check.stdout
-      ignore_errors: yes
-
     - name: Obter lista de diretórios de usuários em C:\Users
       win_shell: |
         $excludedUsers = @('All Users', 'Default', 'Default User', 'KINagSvc', 'Public')
@@ -77,6 +64,31 @@
       debug:
         msg: "Resultados da limpeza: {{ temp_cleanup.stdout }}"
       when: temp_cleanup.rc == 0
+
+    - name: Listar arquivos remanescentes em %temp% após limpeza
+      win_shell: |
+        $userDirs = "{{ user_directories.stdout | replace('\r\n', '') }}".Split(',', [StringSplitOptions]::RemoveEmptyEntries)
+        $results = @()
+        foreach ($dir in $userDirs) {
+          $tempDir = Join-Path -Path $dir.Trim() -ChildPath 'AppData\Local\Temp'
+          if (Test-Path $tempDir) {
+            $files = Get-ChildItem -Path $tempDir -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+            if ($files) {
+              $results += "Arquivos remanescentes em $tempDir : $($files -join ',')"
+            } else {
+              $results += "Nenhum arquivo remanescente em $tempDir"
+            }
+          }
+        }
+        $results -join ';'
+      register: remaining_files
+      ignore_errors: yes
+      when: user_directories.stdout != "Nenhum usuário válido encontrado"
+
+    - name: Debugar arquivos remanescentes
+      debug:
+        msg: "Arquivos remanescentes: {{ remaining_files.stdout }}"
+      when: remaining_files.rc == 0
 
     - name: Calcular o tamanho total das pastas %temp% após limpeza
       win_shell: |

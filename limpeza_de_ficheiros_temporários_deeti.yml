@@ -24,10 +24,9 @@
         msg: "Tamanho da pasta %temp%: {{ temp_size_gb.stdout }} GB"
 
     - name: Deletar arquivos no diretório %temp%
-      win_file:
-        path: "{{ temp_directory.stdout }}"
-        state: absent
-      recurse: yes
+      win_shell: |
+        $tempDir = "{{ temp_directory.stdout }}";
+        Get-ChildItem -Path $tempDir -Recurse | Remove-Item -Force -ErrorAction SilentlyContinue
       ignore_errors: yes
 
     - name: Informar se o diretório %temp% foi limpo

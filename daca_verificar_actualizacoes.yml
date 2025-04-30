@@ -1,0 +1,57 @@
+---
+- name: Verificar e instalar atualizações do sistema e das aplicações
+  hosts: daca
+  gather_facts: yes
+  ignore_unreachable: yes
+  tasks:
+    - name: Verificar atualizações do sistema
+      win_updates:
+        category_names:
+          - SecurityUpdates
+          - CriticalUpdates
+        state: searched
+      register: updates_system
+      ignore_errors: yes
+
+    - name: Atualizar todos os pacotes Chocolatey
+      win_command: choco upgrade all -y
+      register: choco_updates
+      ignore_errors: yes
+
+    - name: Verificar se winget está disponível
+      win_command: where winget
+      register: winget_check
+      ignore_errors: yes
+
+    - name: Listar pacotes desatualizados com winget
+      win_command: winget upgrade
+      register: winget_updates
+      become: yes
+      become_user: inacom\ansible
+      when: winget_check.rc == 0
+      ignore_errors: yes
+
+    - name: Exibir pacotes desatualizados com winget
+      debug:
+        msg: "Pacotes desatualizados com winget: {{ winget_updates.stdout }}"
+      when: winget_updates.stdout != ""
+
+    - name: Atualizar pacotes com winget
+      win_command: winget upgrade --all --accept-package-agreements --accept-source-agreements --silent --force
+      register: winget_upgrade
+      become: yes
+      become_user: inacom\ansible
+      when: winget_updates.stdout != ""
+      ignore_errors: yes
+
+    - name: Exibir resultado do winget upgrade
+      debug:
+        msg: "Resultado do winget upgrade: {{ winget_upgrade.stdout | default('Nenhum resultado') }}"
+      when: winget_upgrade is defined
+
+    - name: Exibir resumo das atualizações
+      debug:
+        msg:
+          - "Atualizações do sistema encontradas: {{ updates_system.found_update_count | default(0) }}"
+          - "Resultado do Chocolatey: {{ choco_updates.stdout | default('Nenhum resultado') }}"
+          - "Resultado do Winget: {{ winget_upgrade.stdout | default('Nenhum resultado') }}"

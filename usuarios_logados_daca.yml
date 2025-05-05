@@ -1,0 +1,14 @@
+---
+- name: Verificar usuários logados ou sessões ativas no Windows
+  hosts:
+    - daca  # Substitua com o nome do seu grupo de hosts
+  gather_facts: no  # Não é necessário coletar fatos aqui
+  ignore_unreachable: yes  # Ignora hosts inacessíveis
+  tasks:
+    - name: Verificar sessões ativas usando qwinsta
+      win_command: qwinsta
+      register: qwinsta_output
+
+    - name: Exibir sessões ativas
+      debug:
+        msg: "{{ qwinsta_output.stdout }}"

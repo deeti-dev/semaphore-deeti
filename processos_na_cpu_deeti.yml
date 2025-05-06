@@ -3,20 +3,26 @@
   hosts:
     - deeti
   gather_facts: yes
-  ignore_unreachable: yes  # Ignorar hosts inacessíveis
+  ignore_unreachable: yes
   tasks:
     - name: Listar os processos que consomem mais CPU (excluindo svchost)
       win_shell: |
-        Get-Process | Where-Object { $_.Name -ne 'svchost' } |
-        Select-Object Name, 
-                       @{Name="CPU %";Expression={[math]::round(($_.CPU / (Get-WmiObject Win32_Processor | Select-Object -ExpandProperty NumberOfCores) / (Get-WmiObject Win32_OperatingSystem | Select-Object -ExpandProperty TotalVisibleMemorySize) * 100), 2)}} |
+        Get-Counter -Counter "\Process(*)\% Processor Time" -MaxSamples 1 |
+        Select-Object -ExpandProperty CounterSamples |
+        Where-Object { $_.InstanceName -ne 'svchost' -and $_.InstanceName -ne '_total' -and $_.InstanceName -ne 'idle' } |
+        Select-Object @{Name="Name";Expression={$_.InstanceName}}, 
+                      @{Name="CPU %";Expression={[math]::round($_.CookedValue / [Environment]::ProcessorCount, 2)}} |
         Sort-Object "CPU %" -Descending |
-        Select-Object -First 20
+        Select-Object -First 20 | Format-Table -AutoSize
       register: process_cpu
       ignore_errors: yes
+
+    - name: Log unreachable or failed hosts
+      debug:
+        msg: "Host {{ inventory_hostname }} failed or is unreachable: {{ process_cpu.msg }}"
+      when: process_cpu is defined and (process_cpu.unreachable | default(false) or process_cpu.failed | default(false))
 
     - name: Exibir os processos que consomem mais CPU
       debug:
         msg: "Processos que consomem mais CPU: {{ process_cpu.stdout }}"
-      when: process_cpu.stdout != ""
-
+      when: process_cpu is defined and process_cpu.stdout is defined and process_cpu.stdout != "" and not process_cpu.failed | default(false) and not process_cpu.unreachable | default(false)

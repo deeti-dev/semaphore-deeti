@@ -7,7 +7,8 @@
   tasks:
     - name: Listar os processos que consomem mais CPU (excluindo svchost)
       win_shell: |
-        Get-Counter -Counter "\Process(*)\% Processor Time" -MaxSamples 1 |
+        $counterPath = (Get-Counter -ListSet Process).Paths | Where-Object { $_ -like '*\*% Processor Time' } | Select-Object -First 1
+        Get-Counter -Counter $counterPath -MaxSamples 1 |
         Select-Object -ExpandProperty CounterSamples |
         Where-Object { $_.InstanceName -ne 'svchost' -and $_.InstanceName -ne '_total' -and $_.InstanceName -ne 'idle' } |
         Select-Object @{Name="Name";Expression={$_.InstanceName}}, 
@@ -19,7 +20,7 @@
 
     - name: Log unreachable or failed hosts
       debug:
-        msg: "Host {{ inventory_hostname }} failed or is unreachable: {{ process_cpu.msg }}"
+        msg: "Host {{ inventory_hostname }} failed or is unreachable: {{ process_cpu.msg }}. Stderr: {{ process_cpu.stderr }}"
       when: process_cpu is defined and (process_cpu.unreachable | default(false) or process_cpu.failed | default(false))
 
     - name: Exibir os processos que consomem mais CPU

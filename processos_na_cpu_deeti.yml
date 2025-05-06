@@ -7,7 +7,12 @@
   tasks:
     - name: Listar os processos que consomem mais CPU (excluindo svchost)
       win_shell: |
-        $counterPath = (Get-Counter -ListSet Process).Paths | Where-Object { $_ -like '*\*% Processor Time' } | Select-Object -First 1
+        $listSet = Get-Counter -ListSet Processo -ErrorAction SilentlyContinue
+        if ($null -eq $listSet) {
+          Write-Output "Contadores de desempenho 'Processo' não encontrados. Verifique a configuração do sistema."
+          exit 0
+        }
+        $counterPath = $listSet.Paths | Where-Object { $_ -like '*\*% de Tempo do Processador' } | Select-Object -First 1
         Get-Counter -Counter $counterPath -MaxSamples 1 |
         Select-Object -ExpandProperty CounterSamples |
         Where-Object { $_.InstanceName -ne 'svchost' -and $_.InstanceName -ne '_total' -and $_.InstanceName -ne 'idle' } |

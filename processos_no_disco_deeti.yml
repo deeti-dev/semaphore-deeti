@@ -12,7 +12,7 @@
                       @{Name="Read MB";Expression={[math]::round($_.IOReadBytes / 1MB, 3)}}, 
                       @{Name="Write MB";Expression={[math]::round($_.IOWriteBytes / 1MB, 3)}} | 
         Sort-Object "Read MB" -Descending | 
-        Select-Object -First 20 | Format-Table -AutoSize
+        Select-Object -First 20 | ConvertTo-Json
       register: processes_disk_usage
       ignore_errors: yes  # Continue despite task failures
 

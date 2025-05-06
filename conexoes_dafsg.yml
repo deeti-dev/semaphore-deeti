@@ -2,7 +2,7 @@
   hosts:
     - dafsg
   gather_facts: yes
-  ignore_unreachable: yes  # Ignorar hosts inacessíveis
+  ignore_unreachable: yes
   tasks:
     - name: Listar conexões ESTABLISHED e LISTENING
       win_shell: |
@@ -14,7 +14,12 @@
       register: network_connections
       ignore_errors: yes
 
+    - name: Log unreachable hosts
+      debug:
+        msg: "Host {{ inventory_hostname }} is unreachable: {{ network_connections.msg }}"
+      when: network_connections is defined and network_connections.unreachable | default(false)
+
     - name: Exibir conexões ESTABLISHED e LISTENING
       debug:
         msg: "Conexões ESTABLISHED e LISTENING: {{ network_connections.stdout }}"
-      when: network_connections is defined and network_connections.stdout != ""
+      when: network_connections is defined and network_connections.stdout is defined and network_connections.stdout != "" and not network_connections.failed | default(false) and not network_connections.unreachable | default(false)

@@ -1,4 +1,3 @@
----
 - name: Verificar conexões ESTABLISHED e LISTENING
   hosts:
     - dafsg
@@ -18,4 +17,4 @@
     - name: Exibir conexões ESTABLISHED e LISTENING
       debug:
         msg: "Conexões ESTABLISHED e LISTENING: {{ network_connections.stdout }}"
-      when: network_connections.stdout != ""
+      when: network_connections is defined and network_connections.stdout != ""

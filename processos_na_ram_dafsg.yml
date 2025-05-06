@@ -1,7 +1,7 @@
 ---
 - name: Verificar os processos que consomem mais RAM no Windows
   hosts:
-    - deeti
+    - dafsg
   gather_facts: no
   ignore_unreachable: yes  # Ignore unreachable hosts
   tasks:

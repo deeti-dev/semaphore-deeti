@@ -1,0 +1,34 @@
+---
+- name: Verificar processos que estão a consumir mais CPU
+  hosts:
+    - deeti
+  gather_facts: yes
+  ignore_unreachable: yes
+  tasks:
+    - name: Listar os processos que consomem mais CPU (excluindo svchost)
+      win_shell: |
+        $listSet = Get-Counter -ListSet Processo -ErrorAction SilentlyContinue
+        if ($null -eq $listSet) {
+          Write-Output "Contadores de desempenho 'Processo' não encontrados. Verifique a configuração do sistema."
+          exit 0
+        }
+        $counterPath = $listSet.Paths | Where-Object { $_ -like '*\*% de Tempo do Processador' } | Select-Object -First 1
+        Get-Counter -Counter $counterPath -MaxSamples 1 |
+        Select-Object -ExpandProperty CounterSamples |
+        Where-Object { $_.InstanceName -ne 'svchost' -and $_.InstanceName -ne '_total' -and $_.InstanceName -ne 'idle' } |
+        Select-Object @{Name="Name";Expression={$_.InstanceName}}, 
+                      @{Name="CPU %";Expression={[math]::round($_.CookedValue / [Environment]::ProcessorCount, 2)}} |
+        Sort-Object "CPU %" -Descending |
+        Select-Object -First 20 | Format-Table -AutoSize
+      register: process_cpu
+      ignore_errors: yes
+
+    - name: Log unreachable or failed hosts
+      debug:
+        msg: "Host {{ inventory_hostname }} failed or is unreachable: {{ process_cpu.msg }}. Stderr: {{ process_cpu.stderr }}"
+      when: process_cpu is defined and (process_cpu.unreachable | default(false) or process_cpu.failed | default(false))
+
+    - name: Exibir os processos que consomem mais CPU
+      debug:
+        msg: "Processos que consomem mais CPU: {{ process_cpu.stdout }}"
+      when: process_cpu is defined and process_cpu.stdout is defined and process_cpu.stdout != "" and not process_cpu.failed | default(false) and not process_cpu.unreachable | default(false)

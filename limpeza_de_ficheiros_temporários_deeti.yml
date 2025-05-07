@@ -20,8 +20,12 @@
     - name: Obter lista de diretórios de usuários em C:\Users
       win_shell: |
         $excludedUsers = @('All Users', 'Default', 'Default User', 'KINagSvc', 'Public')
-        $userDirs = Get-ChildItem -Path 'C:\Users' -Directory -ErrorAction SilentlyContinue | Where-Object { $excludedUsers -notcontains $_.Name } | Select-Object -ExpandProperty FullName
-        if ($userDirs) { $userDirs -join ',' } else { Write-Output "Erro: Nenhum diretório de usuário encontrado ou acesso negado" }
+        try {
+          $userDirs = Get-ChildItem -Path 'C:\Users' -Directory -ErrorAction Stop | Where-Object { $excludedUsers -notcontains $_.Name } | Select-Object -ExpandProperty FullName
+          if ($userDirs) { $userDirs -join ',' } else { Write-Output "Erro: Nenhum diretório de usuário encontrado" }
+        } catch {
+          Write-Output "Erro ao listar diretórios: $($_.Exception.Message)"
+        }
       register: user_directories
       become: yes
       become_user: inacom\ansible
@@ -31,7 +35,12 @@
     - name: Debugar lista de diretórios de usuários
       debug:
         msg: "Diretórios de usuários encontrados: {{ user_directories.stdout | replace('\r\n', '') }}"
-      when: user_directories.rc == 0 and user_directories.stdout is defined and user_directories.stdout != "" and user_directories.stdout != "Erro: Nenhum diretório de usuário encontrado ou acesso negado"
+      when:
+        - user_directories.rc == 0
+        - user_directories.stdout is defined
+        - user_directories.stdout != ""
+        - user_directories.stdout != "Erro: Nenhum diretório de usuário encontrado"
+        - user_directories.stdout does not startswith "Erro ao listar diretórios:"
 
     - name: Calcular tamanho e limpar pastas %temp%
       win_shell: |
@@ -48,10 +57,16 @@
             if ($sizeBefore -ne $null) { $totalSizeBefore += $sizeBefore }
             # Tentar limpeza
             try {
-              Get-ChildItem -Path $tempDir -File -Recurse -ErrorAction Stop | Remove-Item -Force -ErrorAction Stop
+              Get-ChildItem -Path $tempDir -File -Recurse -ErrorAction Stop | ForEach-Object {
+                try {
+                  Remove-Item -Path $_.FullName -Force -ErrorAction Stop
+                } catch {
+                  $cleanupResults += "Erro ao excluir $($_.FullName): $($_.Exception.Message)"
+                }
+              }
               $cleanupResults += "Limpeza bem-sucedida em $tempDir"
             } catch {
-              $cleanupResults += "Erro ao limpar $tempDir : $_"
+              $cleanupResults += "Erro ao limpar $tempDir: $($_.Exception.Message)"
             }
             # Calcular tamanho depois
             $sizeAfter = (Get-ChildItem -Path $tempDir -File -Recurse -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
@@ -60,7 +75,7 @@
             $files = Get-ChildItem -Path $tempDir -File -Recurse -ErrorAction SilentlyContinue
             if ($files) {
               $fileCount = $files.Count
-              $remainingFiles += "$tempDir : $fileCount arquivos remanescentes"
+              $remainingFiles += "$tempDir: $fileCount arquivos remanescentes"
             } else {
               $remainingFiles += "Nenhum arquivo remanescente em $tempDir"
             }
@@ -80,7 +95,12 @@
       become_user: inacom\ansible
       ignore_errors: yes
       timeout: 300
-      when: user_directories.rc == 0 and user_directories.stdout is defined and user_directories.stdout != "" and user_directories.stdout != "Erro: Nenhum diretório de usuário encontrado ou acesso negado"
+      when:
+        - user_directories.rc == 0
+        - user_directories.stdout is defined
+        - user_directories.stdout != ""
+        - user_directories.stdout != "Erro: Nenhum diretório de usuário encontrado"
+        - user_directories.stdout does not startswith "Erro ao listar diretórios:"
 
     - name: Exibir tamanho antes da limpeza
       debug:
@@ -106,3 +126,8 @@
       debug:
         msg: "Limpeza das pastas %temp% concluída. Tamanho antes: {{ (temp_operation.stdout | from_json).SizeBeforeGB }} GB, Tamanho depois: {{ (temp_operation.stdout | from_json).SizeAfterGB }} GB, Economia de espaço: {{ ((temp_operation.stdout | from_json).SizeBeforeGB | float) - ((temp_operation.stdout | from_json).SizeAfterGB | float) }} GB"
       when: temp_operation.rc == 0 and temp_operation.stdout is defined
+
+    - name: Resumir erros de limpeza
+      debug:
+        msg: "Erros encontrados durante a limpeza: {{ ((temp_operation.stdout | from_json).CleanupResults | split(';') | select | where { $_ | regex_match('Erro') }) | join(';') | default('Nenhum erro') }}"
+      when: temp_operation.rc == 0 and temp_operation.stdout is defined and (temp_operation.stdout | from_json).CleanupResults contains 'Erro'

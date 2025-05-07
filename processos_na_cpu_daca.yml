@@ -1,7 +1,7 @@
 ---
 - name: Verificar processos que estão a consumir mais CPU
   hosts:
-    - deeti
+    - daca
   gather_facts: yes
   ignore_unreachable: yes
   tasks:

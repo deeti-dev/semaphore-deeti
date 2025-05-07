@@ -3,6 +3,8 @@
   hosts: deeti
   gather_facts: yes
   ignore_unreachable: yes
+  vars:
+    exclude_log_files: false
   tasks:
     - name: Verificar permissões do usuário inacom\ansible
       win_shell: whoami
@@ -54,6 +56,8 @@
         $totalSizeAfter = 0
         $cleanupResults = @()
         $remainingFiles = @()
+        $lockedFilesCount = 0
+        $excludeLogFiles = {{ exclude_log_files | to_json }}
         try {
           foreach ($dir in $userDirs) {
             $tempDir = Join-Path -Path $dir.Trim() -ChildPath 'AppData\Local\Temp'
@@ -61,44 +65,27 @@
               # Calcular tamanho antes
               $sizeBefore = (Get-ChildItem -Path $tempDir -File -Recurse -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
               if ($sizeBefore -ne $null) { $totalSizeBefore += $sizeBefore }
-              # Tentar limpeza (primeira passagem)
+              # Tentar limpeza
               try {
-                Get-ChildItem -Path $tempDir -File -Recurse -ErrorAction Stop | ForEach-Object {
+                $files = Get-ChildItem -Path $tempDir -File -Recurse -ErrorAction Stop
+                if ($excludeLogFiles) {
+                  $files = $files | Where-Object { $_.Extension -notin @('.log', '.db', '.db-shm', '.db-wal') }
+                }
+                foreach ($file in $files) {
                   try {
-                    Remove-Item -Path $_.FullName -Force -ErrorAction Stop
+                    Remove-Item -Path $file.FullName -Force -ErrorAction Stop
                   } catch {
-                    $cleanupResults += "Erro ao excluir $($_.FullName): $($_.Exception.Message)"
+                    if ($_.Exception.Message -match "O processo não pode aceder ao ficheiro.*está a ser utilizado por outro processo") {
+                      $cleanupResults += "Arquivo em uso: $($file.FullName)"
+                      $lockedFilesCount += 1
+                    } else {
+                      $cleanupResults += "Erro ao excluir $($file.FullName): $($_.Exception.Message)"
+                    }
                   }
                 }
                 $cleanupResults += "Limpeza bem-sucedida em ${tempDir}"
               } catch {
                 $cleanupResults += "Erro ao limpar ${tempDir}: $($_.Exception.Message)"
-              }
-              # Tentar limpeza novamente após 5 segundos (segunda passagem)
-              Start-Sleep -Seconds 5
-              try {
-                Get-ChildItem -Path $tempDir -File -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
-                  try {
-                    Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue
-                  } catch {
-                    $cleanupResults += "Erro na segunda passagem para $($_.FullName): $($_.Exception.Message)"
-                  }
-                }
-              } catch {
-                $cleanupResults += "Erro na segunda passagem para ${tempDir}: $($_.Exception.Message)"
-              }
-              # Tentar limpeza novamente após mais 5 segundos (terceira passagem)
-              Start-Sleep -Seconds 5
-              try {
-                Get-ChildItem -Path $tempDir -File -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
-                  try {
-                    Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue
-                  } catch {
-                    $cleanupResults += "Erro na terceira passagem para $($_.FullName): $($_.Exception.Message)"
-                  }
-                }
-              } catch {
-                $cleanupResults += "Erro na terceira passagem para ${tempDir}: $($_.Exception.Message)"
               }
               # Calcular tamanho depois
               $sizeAfter = (Get-ChildItem -Path $tempDir -File -Recurse -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
@@ -115,6 +102,7 @@
               $cleanupResults += "Pasta não encontrada: ${tempDir}"
             }
           }
+          $cleanupResults += "Total de arquivos em uso: $lockedFilesCount"
           $output = @{
             SizeBeforeGB = if ($totalSizeBefore -eq 0) { "0" } else { [math]::Round($totalSizeBefore / 1GB, 2) }
             SizeAfterGB = if ($totalSizeAfter -eq 0) { "0" } else { [math]::Round($totalSizeAfter / 1GB, 2) }

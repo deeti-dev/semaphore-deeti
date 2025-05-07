@@ -4,6 +4,11 @@
   gather_facts: yes
   ignore_unreachable: yes
   tasks:
+    - name: Logar hosts inacessíveis
+      debug:
+        msg: "Host {{ inventory_hostname }} está inacessível: {{ updates_system.msg | default('Desconhecido') }}"
+      when: updates_system is defined and updates_system.unreachable | default(false)
+
     - name: Verificar atualizações do sistema
       win_updates:
         category_names:
@@ -12,46 +17,126 @@
         state: searched
       register: updates_system
       ignore_errors: yes
+      timeout: 300
+
+    - name: Instalar atualizações do sistema
+      win_updates:
+        category_names:
+          - SecurityUpdates
+          - CriticalUpdates
+        state: installed
+      when: updates_system.found_update_count | default(0) > 0
+      ignore_errors: yes
+      register: updates_system_installed
+      timeout: 300
+
+    - name: Verificar se Chocolatey está instalado
+      win_command: where choco
+      register: choco_check
+      ignore_errors: yes
+      timeout: 30
 
     - name: Atualizar todos os pacotes Chocolatey
       win_command: choco upgrade all -y
       register: choco_updates
+      when: choco_check.rc == 0
       ignore_errors: yes
+      timeout: 300
 
     - name: Verificar se winget está disponível
       win_command: where winget
       register: winget_check
       ignore_errors: yes
+      timeout: 30
+
+    - name: Verificar versão do winget
+      win_command: winget --version
+      register: winget_version
+      when: winget_check.rc == 0
+      ignore_errors: yes
+      timeout: 30
+
+    - name: Logar versão do winget
+      debug:
+        msg: "Versão do Winget em {{ inventory_hostname }}: {{ winget_version.stdout | default('Desconhecida') }}"
+      when: winget_version is defined and winget_version.stdout is defined
 
     - name: Listar pacotes desatualizados com winget
       win_command: winget upgrade
       register: winget_updates
-      become: yes
-      become_user: inacom\ansible
       when: winget_check.rc == 0
       ignore_errors: yes
+      timeout: 60
 
     - name: Exibir pacotes desatualizados com winget
       debug:
-        msg: "Pacotes desatualizados com winget: {{ winget_updates.stdout }}"
-      when: winget_updates.stdout != ""
+        msg: "Pacotes desatualizados com winget: {{ winget_updates.stdout | default('Nenhum pacote listado') }}"
+      when: winget_updates is defined and winget_updates.stdout is defined and winget_updates.stdout != "" and not winget_updates.failed | default(false)
 
-    - name: Atualizar pacotes com winget
-      win_command: winget upgrade --all --accept-package-agreements --accept-source-agreements --silent --force
-      register: winget_upgrade
+    - name: Logar falhas na listagem do winget
+      debug:
+        msg: "Falha ao listar pacotes com winget para {{ inventory_hostname }}: {{ winget_updates.stderr | default('Sem stderr') }}"
+      when: winget_updates is defined and winget_updates.failed | default(false)
+
+    - name: Verificar permissões do usuário inacom\ansible
+      win_shell: whoami
       become: yes
       become_user: inacom\ansible
-      when: winget_updates.stdout != ""
+      register: user_check
       ignore_errors: yes
+      timeout: 30
+
+    - name: Logar permissões do usuário
+      debug:
+        msg: "Usuário inacom\\ansible: {{ user_check.stdout | default('Não identificado') }}"
+      when: user_check is defined and user_check.stdout is defined
+
+    - name: Atualizar pacotes com winget (Win32)
+      win_command: winget upgrade --all --accept-package-agreements --accept-source-agreements --force --scope machine --include-unknown
+      become: yes
+      become_user: inacom\ansible
+      register: winget_upgrade
+      when: winget_updates is defined and winget_updates.stdout is defined and winget_updates.stdout != "" and not winget_updates.failed | default(false)
+      ignore_errors: yes
+      timeout: 300
+
+    - name: Logar falhas do winget upgrade (Win32)
+      debug:
+        msg: "Falha no winget upgrade (Win32) para {{ inventory_hostname }}: {{ winget_upgrade.stderr | default('Sem stderr') }}"
+      when: winget_upgrade is defined and winget_upgrade.failed | default(false)
+
+    - name: Atualizar pacotes UWP com winget
+      win_shell: |
+        $user = Get-WmiObject -Class Win32_ComputerSystem | Select-Object -ExpandProperty UserName
+        if ($user) {
+          $cmd = "winget upgrade --all --accept-package-agreements --accept-source-agreements --force --scope user --include-unknown"
+          $result = Start-Process -FilePath "cmd.exe" -ArgumentList "/c $cmd" -NoNewWindow -Wait -PassThru
+          Write-Output "Resultado para usuário $user (ExitCode: $($result.ExitCode)):"
+          winget upgrade
+        } else {
+          Write-Output "Nenhum usuário logado. Pulando atualizações UWP."
+        }
+      register: winget_uwp_upgrade
+      when: winget_updates is defined and winget_updates.stdout is defined and winget_updates.stdout != "" and not winget_updates.failed | default(false)
+      ignore_errors: yes
+      timeout: 300
+
+    - name: Logar falhas do winget upgrade (UWP)
+      debug:
+        msg: "Falha no winget upgrade (UWP) para {{ inventory_hostname }}: {{ winget_uwp_upgrade.stdout | default('Sem stdout') }}"
+      when: winget_uwp_upgrade is defined and winget_uwp_upgrade.failed | default(false)
 
     - name: Exibir resultado do winget upgrade
       debug:
-        msg: "Resultado do winget upgrade: {{ winget_upgrade.stdout | default('Nenhum resultado') }}"
-      when: winget_upgrade is defined
+        msg: "Resultado do winget upgrade: Win32: {{ winget_upgrade.stdout | default('Nenhum resultado') }} | UWP: {{ winget_uwp_upgrade.stdout | default('Nenhum resultado') }}"
+      when: winget_upgrade is defined or winget_uwp_upgrade is defined
 
     - name: Exibir resumo das atualizações
       debug:
         msg:
           - "Atualizações do sistema encontradas: {{ updates_system.found_update_count | default(0) }}"
+          - "Atualizações do sistema instaladas: {{ updates_system_installed.installed_update_count | default(0) }}"
           - "Resultado do Chocolatey: {{ choco_updates.stdout | default('Nenhum resultado') }}"
-          - "Resultado do Winget: {{ winget_upgrade.stdout | default('Nenhum resultado') }}"
+          - "Resultado do Winget (Win32): {{ winget_upgrade.stdout | default('Nenhum resultado') }}"
+          - "Resultado do Winget (UWP): {{ winget_uwp_upgrade.stdout | default('Nenhum resultado') }}"
+      when: updates_system is defined or choco_updates is defined or winget_upgrade is defined or winget_uwp_upgrade is defined

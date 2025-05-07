@@ -1,6 +1,6 @@
 ---
 - name: Verificar e instalar atualizações do sistema e das aplicações
-  hosts: daca
+  hosts: drmsu
   gather_facts: yes
   ignore_unreachable: yes
   tasks:

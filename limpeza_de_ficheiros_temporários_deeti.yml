@@ -74,18 +74,31 @@
               } catch {
                 $cleanupResults += "Erro ao limpar ${tempDir}: $($_.Exception.Message)"
               }
-              # Tentar limpeza novamente após 1 segundo (segunda passagem)
-              Start-Sleep -Milliseconds 1000
+              # Tentar limpeza novamente após 5 segundos (segunda passagem)
+              Start-Sleep -Seconds 5
               try {
                 Get-ChildItem -Path $tempDir -File -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
                   try {
                     Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue
                   } catch {
-                    # Erros na segunda passagem são ignorados para evitar duplicação
+                    $cleanupResults += "Erro na segunda passagem para $($_.FullName): $($_.Exception.Message)"
                   }
                 }
               } catch {
-                # Ignorar erros na segunda passagem
+                $cleanupResults += "Erro na segunda passagem para ${tempDir}: $($_.Exception.Message)"
+              }
+              # Tentar limpeza novamente após mais 5 segundos (terceira passagem)
+              Start-Sleep -Seconds 5
+              try {
+                Get-ChildItem -Path $tempDir -File -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+                  try {
+                    Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue
+                  } catch {
+                    $cleanupResults += "Erro na terceira passagem para $($_.FullName): $($_.Exception.Message)"
+                  }
+                }
+              } catch {
+                $cleanupResults += "Erro na terceira passagem para ${tempDir}: $($_.Exception.Message)"
               }
               # Calcular tamanho depois
               $sizeAfter = (Get-ChildItem -Path $tempDir -File -Recurse -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
@@ -116,6 +129,7 @@
       register: temp_operation
       become: yes
       become_user: inacom\ansible
+      ignore_errors: yes
       timeout: 300
       when:
         - user_directories.rc == 0
@@ -156,5 +170,5 @@
 
     - name: Resumir erros de limpeza
       debug:
-        msg: "Erros encontrados durante a limpeza: {{ ((temp_operation.stdout | from_json).CleanupResults | split(';') | select | where { $_ | regex_search('Erro') }) | join(';') | default('Nenhum erro') }}"
+        msg: "Erros encontrados durante a limpeza: {{ ((temp_operation.stdout | from_json).CleanupResults | split(';') | select('search', 'Erro') | list) | join(';') | default('Nenhum erro') }}"
       when: temp_operation.rc == 0 and temp_operation.stdout is defined and temp_operation.stdout != "" and (temp_operation.stdout | from_json).CleanupResults | regex_search('Erro')

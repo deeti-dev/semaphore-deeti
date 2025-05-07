@@ -44,20 +44,36 @@
       register: winget_check
       ignore_errors: yes
 
+    - name: Tentar atualizar winget via Microsoft Store
+      win_shell: |
+        $app = Get-AppxPackage -Name "Microsoft.DesktopAppInstaller"
+        if ($app) {
+          Write-Output "Winget encontrado. Versão: $($app.Version)"
+          # Tentar atualizar via Microsoft Store
+          Start-Process -FilePath "ms-windows-store://pdp/?ProductId=9NBLGGH4NNS1" -NoNewWindow -Wait
+          Write-Output "Tentativa de atualização do Winget concluída."
+        } else {
+          Write-Output "Winget não encontrado como pacote UWP."
+        }
+      register: winget_update_store
+      when: winget_check.rc == 0
+      ignore_errors: yes
+
     - name: Listar pacotes desatualizados com winget
-      win_command: winget upgrade --output json
+      win_command: winget upgrade
       register: winget_updates
       when: winget_check.rc == 0
       ignore_errors: yes
 
     - name: Exibir pacotes desatualizados com winget
       debug:
-        msg: |
-          Pacotes desatualizados com winget:
-          {% for pkg in (winget_updates.stdout | from_json).Upgrades %}
-          - {{ pkg.Name }}: {{ pkg.Version }} -> {{ pkg.Available }}
-          {% endfor %}
+        msg: "Pacotes desatualizados com winget: {{ winget_updates.stdout | default('Nenhum pacote listado') }}"
       when: winget_updates is defined and winget_updates.stdout is defined and winget_updates.stdout != "" and not winget_updates.failed | default(false)
+
+    - name: Logar falhas na listagem do winget
+      debug:
+        msg: "Falha ao listar pacotes com winget para {{ inventory_hostname }}: {{ winget_updates.stderr | default('Sem stderr') }}"
+      when: winget_updates is defined and winget_updates.failed | default(false)
 
     - name: Atualizar pacotes com winget
       win_command: winget upgrade --all --accept-package-agreements --accept-source-agreements --force --scope machine
@@ -65,7 +81,7 @@
       when: winget_updates is defined and winget_updates.stdout is defined and winget_updates.stdout != "" and not winget_updates.failed | default(false)
       ignore_errors: yes
 
-    - name: Logar falhas do winget
+    - name: Logar falhas do winget upgrade
       debug:
         msg: "Falha no winget upgrade para {{ inventory_hostname }}: {{ winget_upgrade.stderr | default('Sem stderr') }}"
       when: winget_upgrade is defined and winget_upgrade.failed | default(false)

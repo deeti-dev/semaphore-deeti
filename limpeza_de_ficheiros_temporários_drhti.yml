@@ -1,6 +1,6 @@
 ---
 - name: Limpar arquivos temporários no %temp% de todos os usuários e obter o tamanho
-  hosts: deeti
+  hosts: drhti
   gather_facts: yes
   ignore_unreachable: yes
   vars:

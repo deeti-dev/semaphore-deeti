@@ -17,6 +17,7 @@
         state: searched
       register: updates_system
       ignore_errors: yes
+      timeout: 300
 
     - name: Instalar atualizações do sistema
       win_updates:
@@ -27,56 +28,45 @@
       when: updates_system.found_update_count | default(0) > 0
       ignore_errors: yes
       register: updates_system_installed
+      timeout: 300
 
     - name: Verificar se Chocolatey está instalado
       win_command: where choco
       register: choco_check
       ignore_errors: yes
+      timeout: 30
 
     - name: Atualizar todos os pacotes Chocolatey
       win_command: choco upgrade all -y
       register: choco_updates
       when: choco_check.rc == 0
       ignore_errors: yes
+      timeout: 300
 
     - name: Verificar se winget está disponível
       win_command: where winget
       register: winget_check
       ignore_errors: yes
+      timeout: 30
 
     - name: Verificar versão do winget
       win_command: winget --version
       register: winget_version
       when: winget_check.rc == 0
       ignore_errors: yes
+      timeout: 30
 
     - name: Logar versão do winget
       debug:
         msg: "Versão do Winget em {{ inventory_hostname }}: {{ winget_version.stdout | default('Desconhecida') }}"
       when: winget_version is defined and winget_version.stdout is defined
 
-    - name: Atualizar winget para a versão mais recente
-      win_shell: |
-        $url = "https://github.com/microsoft/winget-cli/releases/latest/download/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
-        $output = "$env:TEMP\winget.msixbundle"
-        Invoke-WebRequest -Uri $url -OutFile $output
-        Add-AppxPackage -Path $output
-        Remove-Item $output
-        winget --version
-      register: winget_update
-      when: winget_check.rc == 0
-      ignore_errors: yes
-
-    - name: Logar resultado da atualização do winget
-      debug:
-        msg: "Resultado da atualização do Winget: {{ winget_update.stdout | default('Nenhuma atualização realizada') }}"
-      when: winget_update is defined and winget_update.stdout is defined
-
     - name: Listar pacotes desatualizados com winget
       win_command: winget upgrade
       register: winget_updates
       when: winget_check.rc == 0
       ignore_errors: yes
+      timeout: 60
 
     - name: Exibir pacotes desatualizados com winget
       debug:
@@ -88,6 +78,19 @@
         msg: "Falha ao listar pacotes com winget para {{ inventory_hostname }}: {{ winget_updates.stderr | default('Sem stderr') }}"
       when: winget_updates is defined and winget_updates.failed | default(false)
 
+    - name: Verificar permissões do usuário inacom\ansible
+      win_shell: whoami
+      become: yes
+      become_user: inacom\ansible
+      register: user_check
+      ignore_errors: yes
+      timeout: 30
+
+    - name: Logar permissões do usuário
+      debug:
+        msg: "Usuário inacom\\ansible: {{ user_check.stdout | default('Não identificado') }}"
+      when: user_check is defined and user_check.stdout is defined
+
     - name: Atualizar pacotes com winget (Win32)
       win_command: winget upgrade --all --accept-package-agreements --accept-source-agreements --force --scope machine --include-unknown
       become: yes
@@ -95,6 +98,7 @@
       register: winget_upgrade
       when: winget_updates is defined and winget_updates.stdout is defined and winget_updates.stdout != "" and not winget_updates.failed | default(false)
       ignore_errors: yes
+      timeout: 300
 
     - name: Logar falhas do winget upgrade (Win32)
       debug:
@@ -115,6 +119,7 @@
       register: winget_uwp_upgrade
       when: winget_updates is defined and winget_updates.stdout is defined and winget_updates.stdout != "" and not winget_updates.failed | default(false)
       ignore_errors: yes
+      timeout: 300
 
     - name: Logar falhas do winget upgrade (UWP)
       debug:

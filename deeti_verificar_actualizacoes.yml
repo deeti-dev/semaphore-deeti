@@ -45,26 +45,35 @@
       ignore_errors: yes
 
     - name: Listar pacotes desatualizados com winget
-      win_command: winget upgrade
+      win_command: winget upgrade --output json
       register: winget_updates
       when: winget_check.rc == 0
       ignore_errors: yes
 
     - name: Exibir pacotes desatualizados com winget
       debug:
-        msg: "Pacotes desatualizados com winget: {{ winget_updates.stdout }}"
+        msg: |
+          Pacotes desatualizados com winget:
+          {% for pkg in (winget_updates.stdout | from_json).Upgrades %}
+          - {{ pkg.Name }}: {{ pkg.Version }} -> {{ pkg.Available }}
+          {% endfor %}
       when: winget_updates is defined and winget_updates.stdout is defined and winget_updates.stdout != "" and not winget_updates.failed | default(false)
 
     - name: Atualizar pacotes com winget
-      win_command: winget upgrade --all --accept-package-agreements --accept-source-agreements --force
+      win_command: winget upgrade --all --accept-package-agreements --accept-source-agreements --force --scope machine
       register: winget_upgrade
       when: winget_updates is defined and winget_updates.stdout is defined and winget_updates.stdout != "" and not winget_updates.failed | default(false)
       ignore_errors: yes
 
+    - name: Logar falhas do winget
+      debug:
+        msg: "Falha no winget upgrade para {{ inventory_hostname }}: {{ winget_upgrade.stderr | default('Sem stderr') }}"
+      when: winget_upgrade is defined and winget_upgrade.failed | default(false)
+
     - name: Exibir resultado do winget upgrade
       debug:
         msg: "Resultado do winget upgrade: {{ winget_upgrade.stdout | default('Nenhum resultado') }}"
-      when: winget_upgrade is defined and winget_upgrade.stdout is defined and not winget_upgrade.failed | default(false)
+      when: winget_upgrade is defined and winget_upgrade.stdout is defined
 
     - name: Exibir resumo das atualizações
       debug:

@@ -4,6 +4,11 @@
   gather_facts: yes
   ignore_unreachable: yes
   tasks:
+    - name: Logar hosts inacessíveis
+      debug:
+        msg: "Host {{ inventory_hostname }} está inacessível: {{ updates_system.msg | default('Desconhecido') }}"
+      when: updates_system is defined and updates_system.unreachable | default(false)
+
     - name: Verificar atualizações do sistema
       win_updates:
         category_names:
@@ -13,9 +18,25 @@
       register: updates_system
       ignore_errors: yes
 
+    - name: Instalar atualizações do sistema
+      win_updates:
+        category_names:
+          - SecurityUpdates
+          - CriticalUpdates
+        state: installed
+      when: updates_system.found_update_count | default(0) > 0
+      ignore_errors: yes
+      register: updates_system_installed
+
+    - name: Verificar se Chocolatey está instalado
+      win_command: where choco
+      register: choco_check
+      ignore_errors: yes
+
     - name: Atualizar todos os pacotes Chocolatey
       win_command: choco upgrade all -y
       register: choco_updates
+      when: choco_check.rc == 0
       ignore_errors: yes
 
     - name: Verificar se winget está disponível
@@ -26,32 +47,30 @@
     - name: Listar pacotes desatualizados com winget
       win_command: winget upgrade
       register: winget_updates
-      become: yes
-      become_user: inacom\ansible
       when: winget_check.rc == 0
       ignore_errors: yes
 
     - name: Exibir pacotes desatualizados com winget
       debug:
         msg: "Pacotes desatualizados com winget: {{ winget_updates.stdout }}"
-      when: winget_updates.stdout != ""
+      when: winget_updates is defined and winget_updates.stdout is defined and winget_updates.stdout != "" and not winget_updates.failed | default(false)
 
     - name: Atualizar pacotes com winget
-      win_command: winget upgrade --all --accept-package-agreements --accept-source-agreements --silent --force
+      win_command: winget upgrade --all --accept-package-agreements --accept-source-agreements --force
       register: winget_upgrade
-      become: yes
-      become_user: inacom\ansible
-      when: winget_updates.stdout != ""
+      when: winget_updates is defined and winget_updates.stdout is defined and winget_updates.stdout != "" and not winget_updates.failed | default(false)
       ignore_errors: yes
 
     - name: Exibir resultado do winget upgrade
       debug:
         msg: "Resultado do winget upgrade: {{ winget_upgrade.stdout | default('Nenhum resultado') }}"
-      when: winget_upgrade is defined
+      when: winget_upgrade is defined and winget_upgrade.stdout is defined and not winget_upgrade.failed | default(false)
 
     - name: Exibir resumo das atualizações
       debug:
         msg:
           - "Atualizações do sistema encontradas: {{ updates_system.found_update_count | default(0) }}"
+          - "Atualizações do sistema instaladas: {{ updates_system_installed.installed_update_count | default(0) }}"
           - "Resultado do Chocolatey: {{ choco_updates.stdout | default('Nenhum resultado') }}"
           - "Resultado do Winget: {{ winget_upgrade.stdout | default('Nenhum resultado') }}"
+      when: updates_system is defined or choco_updates is defined or winget_upgrade is defined

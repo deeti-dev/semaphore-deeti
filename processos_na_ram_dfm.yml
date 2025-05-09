@@ -1,0 +1,22 @@
+---
+- name: Verificar os processos que consomem mais RAM no Windows
+  hosts:
+    - dfm
+  gather_facts: no
+  ignore_unreachable: yes  # Ignore unreachable hosts
+  tasks:
+    - name: Listar processos que consomem mais memória
+      win_shell: |
+        Get-Process | Sort-Object -Property WorkingSet -Descending | Select-Object -First 10 Name, Id, @{Name="RAM(GB)";Expression={[math]::round($_.WorkingSet/1GB,2)}} | Format-Table -AutoSize
+      register: high_memory_processes
+      ignore_errors: yes  # Continue despite task failures
+
+    - name: Log unreachable or failed hosts
+      debug:
+        msg: "Host {{ inventory_hostname }} failed or is unreachable: {{ high_memory_processes.msg }}"
+      when: high_memory_processes is defined and (high_memory_processes.unreachable | default(false) or high_memory_processes.failed | default(false))
+
+    - name: Exibir processos que mais consomem RAM
+      debug:
+        msg: "{{ high_memory_processes.stdout }}"
+      when: high_memory_processes is defined and high_memory_processes.stdout is defined and high_memory_processes.stdout != "" and not high_memory_processes.failed | default(false) and not high_memory_processes.unreachable | default(false)

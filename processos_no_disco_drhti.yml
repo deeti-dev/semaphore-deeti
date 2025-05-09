@@ -1,0 +1,27 @@
+---
+- name: Verificar processos que consomem mais disco
+  hosts:
+    - drhti
+  gather_facts: yes
+  ignore_unreachable: yes
+  tasks:
+    - name: Listar processos que consomem mais disco, excluindo o svchost
+      win_shell: |
+        Get-Process | Where-Object { $_.Name -ne 'svchost' } | 
+        Select-Object Name, 
+                      @{Name="Read MB";Expression={[math]::round($_.IOReadBytes / 1MB, 3)}}, 
+                      @{Name="Write MB";Expression={[math]::round($_.IOWriteBytes / 1MB, 3)}} | 
+        Sort-Object "Read MB" -Descending | 
+        Select-Object -First 20 | ConvertTo-Json
+      register: processes_disk_usage
+      ignore_errors: yes  # Continue despite task failures
+
+    - name: Log unreachable or failed hosts
+      debug:
+        msg: "Host {{ inventory_hostname }} failed or is unreachable: {{ processes_disk_usage.msg }}"
+      when: processes_disk_usage is defined and (processes_disk_usage.unreachable | default(false) or processes_disk_usage.failed | default(false))
+
+    - name: Exibir os processos que consomem mais disco
+      debug:
+        msg: "{{ processes_disk_usage.stdout }}"
+      when: processes_disk_usage is defined and processes_disk_usage.stdout is defined and processes_disk_usage.stdout != "" and not processes_disk_usage.failed | default(false) and not processes_disk_usage.unreachable | default(false)

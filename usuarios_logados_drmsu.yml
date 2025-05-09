@@ -1,0 +1,21 @@
+---
+- name: Verificar usuários logados ou sessões ativas no Windows
+  hosts:
+    - drmsu
+  gather_facts: no
+  ignore_unreachable: yes
+  tasks:
+    - name: Verificar sessões ativas usando qwinsta
+      win_command: qwinsta
+      register: qwinsta_output
+      ignore_errors: yes
+
+    - name: Log unreachable hosts
+      debug:
+        msg: "Host {{ inventory_hostname }} is unreachable: {{ qwinsta_output.msg }}"
+      when: qwinsta_output is defined and qwinsta_output.unreachable | default(false)
+
+    - name: Exibir sessões ativas
+      debug:
+        msg: "{{ qwinsta_output.stdout }}"
+      when: qwinsta_output is defined and qwinsta_output.stdout is defined and qwinsta_output.stdout != "" and not qwinsta_output.failed | default(false) and not qwinsta_output.unreachable | default(false)

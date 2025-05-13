@@ -33,19 +33,6 @@
       delegate_to: localhost
       when: winrm_connect.failed is defined and winrm_connect.failed
 
-    - name: Opcional - Verificar WinRM com Test-WSMan
-      ansible.builtin.shell: |
-        powershell -Command "Test-WSMan -ComputerName {{ inventory_hostname }} -Port {{ winrm_port }} -ErrorAction Stop | ConvertTo-Json"
-      register: test_wsman
-      ignore_errors: yes
-      delegate_to: localhost
-      when: winrm_connect.failed is not defined or not winrm_connect.failed
-
-    - name: Logar resultado do Test-WSMan
-      debug:
-        msg: "Resultado do Test-WSMan em {{ inventory_hostname }}: {{ test_wsman.stdout | default('N/A') }}"
-      when: test_wsman.stdout is defined and test_wsman.stdout != ""
-
     - name: Verificar status do serviço WinRM
       win_shell: Get-Service -Name WinRM | Select-Object -Property Name, Status, StartType | ConvertTo-Json
       register: winrm_service
@@ -82,7 +69,7 @@
     - name: Debugar informações de volumes
       debug:
         msg: "Volume {{ item.DriveLetter }} em {{ inventory_hostname }}: Tamanho={{ item.SizeGB }}GB, Livre={{ item.FreeSpaceGB }}GB ({{ item.FreePercent }}%), Status={{ item.HealthStatus }}, Alerta={{ item.Alert }}"
-      loop: "{{ (volume_info.stdout | from_json) | default([]) }}"
+      loop: "{{ volume_info.stdout | from_json | list }}"
       when: volume_info.stdout is defined and volume_info.stdout != ""
 
     - name: Coletar status SMART dos discos físicos

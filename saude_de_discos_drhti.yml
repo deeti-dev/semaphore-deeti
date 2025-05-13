@@ -40,7 +40,7 @@
       when: winrm_connect.failed is defined and winrm_connect.failed
 
     - name: Verificar carga do host
-      win_shell: |
+      win_shell:
         $cpu = (Get-Counter -Counter "\Processor(_Total)\% Processor Time").CounterSamples.CookedValue
         if ($cpu -gt 80) { Write-Output "CPU alta: $cpu%" }
         else { Write-Output "CPU OK: $cpu%" }
@@ -250,3 +250,21 @@
       when: disk_perf.stdout is defined
 
     - name: Resumir alertas
+      debug:
+        msg: |
+          Resumo de alertas em {{ inventory_hostname }}:
+          - Volumes: {{ (volume_info.stdout | default('') | from_json | default({'value': []}) | json_query('value[?Alert != `OK`]') | length) }} alertas
+          - SMART: {{ (smart_info.stdout | default('') | from_json | default({'value': []}) | json_query('value[?Alert != `OK`]') | length) }} alertas
+          - Erros de Disco: {{ (disk_errors.stdout | default('') | from_json | default({'value': []}) | json_query('value') | length) }} erros
+          - Desempenho: {{ (disk_perf.stdout | default('') | from_json | default({'value': []}) | json_query('value[?Alert != `OK`]') | length) }} alertas
+      when:
+        - volume_info.stdout is defined or smart_info.stdout is defined or disk_errors.stdout is defined or disk_perf.stdout is defined
+
+    - name: Registrar resultados no log
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Volumes={{ (volume_info.stdout | from_json | json_query('value') | default([]) | to_json) | default('N/A') }}; SMART={{ (smart_info.stdout | from_json | json_query('value') | default([]) | to_json) | default('N/A') }}; Erros={{ (disk_errors.stdout | from_json | json_query('value') | default([]) | to_json) | default('N/A') }}; Desempenho={{ (disk_perf.stdout | from_json | json_query('value') | default([]) | to_json) | default('N/A') }}"
+        create: yes
+      delegate_to: localhost
+      when:
+        - volume_info.stdout is defined or smart_info.stdout is defined or disk_errors.stdout is defined or disk_perf.stdout is defined

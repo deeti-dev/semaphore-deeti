@@ -128,7 +128,7 @@
 
     - name: Debugar status SMART
       debug:
-        msg: "Disco {{ item.DeviceId }} ({{ item.Model })) em {{ inventory_hostname }}: Status Operacional={{ item.OperationalStatus }}, Status SMART={{ item.HealthStatus }}, Alerta={{ item.Alert }}"
+        msg: "Disco {{ item.DeviceId }} ({{ item.Model }}) em {{ inventory_hostname }}: Status Operacional={{ item.OperationalStatus }}, Status SMART={{ item.HealthStatus }}, Alerta={{ item.Alert }}"
       loop: "{{ smart_info.stdout | from_json | json_query('value') }}"
       when:
         - smart_info.stdout is defined

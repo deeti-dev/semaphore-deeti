@@ -40,12 +40,13 @@
       when: winrm_connect.failed is defined and winrm_connect.failed
 
     - name: Verificar carga do host
-      win_shell:
+      win_shell: |
         $cpu = (Get-Counter -Counter "\Processor(_Total)\% Processor Time").CounterSamples.CookedValue
-        if ($cpu -gt 80) { Write-Output "CPU alta: $cpu%" }
-        else { Write-Output "CPU OK: $cpu%" }
+        if ($cpu -gt 80) { Write-Output "CPU alta: $cpu percent" }
+        else { Write-Output "CPU OK: $cpu percent" }
       register: cpu_load
       ignore_errors: yes
+      timeout: 120
       when: winrm_connect.failed is not defined or not winrm_connect.failed
 
     - name: Pular se CPU alta

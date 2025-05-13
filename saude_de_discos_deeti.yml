@@ -63,10 +63,13 @@
               }
             }
           }
-          # Sempre retornar uma lista
-          ,$output | ConvertTo-Json -Depth 3
+          # Estrutura com value e Count
+          [PSCustomObject]@{
+            value = $output
+            Count = $output.Count
+          } | ConvertTo-Json -Depth 3
         } catch {
-          Write-Output "[]"
+          Write-Output '{"value": [], "Count": 0}'
         }
       register: volume_info
       ignore_errors: yes
@@ -81,11 +84,11 @@
     - name: Debugar informações de volumes
       debug:
         msg: "Volume {{ item.DriveLetter }} em {{ inventory_hostname }}: Tamanho={{ item.SizeGB }}GB, Livre={{ item.FreeSpaceGB }}GB ({{ item.FreePercent }}%), Status={{ item.HealthStatus }}, Alerta={{ item.Alert }}"
-      loop: "{{ [volume_info.stdout | from_json] }}"
+      loop: "{{ volume_info.stdout | from_json | json_query('value') }}"
       when:
         - volume_info.stdout is defined
         - volume_info.stdout != ""
-        - volume_info.stdout != "[]"
+        - volume_info.stdout != '{"value": [], "Count": 0}'
 
     - name: Coletar status SMART dos discos físicos
       win_shell: |
@@ -101,10 +104,12 @@
               Alert = if ($disk.HealthStatus -ne 'Healthy') { "Problema detectado: $($disk.HealthStatus)" } else { "OK" }
             }
           }
-          # Sempre retornar uma lista
-          ,$output | ConvertTo-Json -Depth 3
+          [PSCustomObject]@{
+            value = $output
+            Count = $output.Count
+          } | ConvertTo-Json -Depth 3
         } catch {
-          Write-Output "[]"
+          Write-Output '{"value": [], "Count": 0}'
         }
       register: smart_info
       ignore_errors: yes
@@ -114,11 +119,11 @@
     - name: Debugar status SMART
       debug:
         msg: "Disco {{ item.DeviceId }} ({{ item.Model }}) em {{ inventory_hostname }}: Status Operacional={{ item.OperationalStatus }}, Status SMART={{ item.HealthStatus }}, Alerta={{ item.Alert }}"
-      loop: "{{ [smart_info.stdout | from_json] }}"
+      loop: "{{ smart_info.stdout | from_json | json_query('value') }}"
       when:
         - smart_info.stdout is defined
         - smart_info.stdout != ""
-        - smart_info.stdout != "[]"
+        - smart_info.stdout != '{"value": [], "Count": 0}'
 
     - name: Verificar erros de disco no log de eventos
       win_shell: |
@@ -135,10 +140,12 @@
               Level = $event.LevelDisplayName
             }
           }
-          # Sempre retornar uma lista
-          ,$output | ConvertTo-Json -Depth 3
+          [PSCustomObject]@{
+            value = $output
+            Count = $output.Count
+          } | ConvertTo-Json -Depth 3
         } catch {
-          Write-Output "[]"
+          Write-Output '{"value": [], "Count": 0}'
         }
       register: disk_errors
       ignore_errors: yes
@@ -148,11 +155,11 @@
     - name: Debugar erros de disco
       debug:
         msg: "Erro de disco em {{ inventory_hostname }} às {{ item.TimeCreated }}: ID={{ item.EventId }}, Nível={{ item.Level }}, Mensagem={{ item.Message }}"
-      loop: "{{ [disk_errors.stdout | from_json] }}"
+      loop: "{{ disk_errors.stdout | from_json | json_query('value') }}"
       when:
         - disk_errors.stdout is defined
         - disk_errors.stdout != ""
-        - disk_errors.stdout != "[]"
+        - disk_errors.stdout != '{"value": [], "Count": 0}'
 
     - name: Coletar métricas de desempenho do disco
       win_shell: |
@@ -169,10 +176,12 @@
               Alert = if ($disk.AvgDiskSecPerRead -gt 25 -or $disk.AvgDiskSecPerWrite -gt 25) { "Latência alta detectada" } elseif ($disk.DiskReadErrors -gt 0 -or $disk.DiskWriteErrors -gt 0) { "Erros de leitura/escrita detectados" } else { "OK" }
             }
           }
-          # Sempre retornar uma lista
-          ,$output | ConvertTo-Json -Depth 3
+          [PSCustomObject]@{
+            value = $output
+            Count = $output.Count
+          } | ConvertTo-Json -Depth 3
         } catch {
-          Write-Output "[]"
+          Write-Output '{"value": [], "Count": 0}'
         }
       register: disk_perf
       ignore_errors: yes
@@ -182,27 +191,27 @@
     - name: Debugar métricas de desempenho
       debug:
         msg: "Disco {{ item.Name }} em {{ inventory_hostname }}: Latência Leitura={{ item.AvgDiskSecPerRead }}ms, Latência Escrita={{ item.AvgDiskSecPerWrite }}ms, Erros Leitura={{ item.DiskReadErrors }}, Erros Escrita={{ item.DiskWriteErrors }}, Alerta={{ item.Alert }}"
-      loop: "{{ [disk_perf.stdout | from_json] }}"
+      loop: "{{ disk_perf.stdout | from_json | json_query('value') }}"
       when:
         - disk_perf.stdout is defined
         - disk_perf.stdout != ""
-        - disk_perf.stdout != "[]"
+        - disk_perf.stdout != '{"value": [], "Count": 0}'
 
     - name: Resumir alertas críticos
       debug:
         msg: |
           Resumo de alertas em {{ inventory_hostname }}:
-          - Volumes: {{ (volume_info.stdout | from_json | select('Alert', 'ne', 'OK') | list | length) }} alertas
-          - SMART: {{ (smart_info.stdout | from_json | select('Alert', 'ne', 'OK') | list | length) }} alertas
-          - Erros de Disco: {{ (disk_errors.stdout | from_json | list | length) }} erros
-          - Desempenho: {{ (disk_perf.stdout | from_json | select('Alert', 'ne', 'OK') | list | length) }} alertas
+          - Volumes: {{ (volume_info.stdout | from_json | json_query('value') | select('Alert', 'ne', 'OK') | list | length) }} alertas
+          - SMART: {{ (smart_info.stdout | from_json | json_query('value') | select('Alert', 'ne', 'OK') | list | length) }} alertas
+          - Erros de Disco: {{ (disk_errors.stdout | from_json | json_query('value') | list | length) }} erros
+          - Desempenho: {{ (disk_perf.stdout | from_json | json_query('value') | select('Alert', 'ne', 'OK') | list | length) }} alertas
       when:
         - volume_info.stdout is defined or smart_info.stdout is defined or disk_errors.stdout is defined or disk_perf.stdout is defined
 
     - name: Registrar resultados no log
       ansible.builtin.lineinfile:
         path: "{{ log_path }}"
-        line: "{{ inventory_hostname }}: Volumes={{ (volume_info.stdout | from_json | to_json) | default('N/A') }}; SMART={{ (smart_info.stdout | from_json | to_json) | default('N/A') }}; Erros={{ (disk_errors.stdout | from_json | to_json) | default('N/A') }}; Desempenho={{ (disk_perf.stdout | from_json | to_json) | default('N/A') }}"
+        line: "{{ inventory_hostname }}: Volumes={{ (volume_info.stdout | from_json | json_query('value') | to_json) | default('N/A') }}; SMART={{ (smart_info.stdout | from_json | json_query('value') | to_json) | default('N/A') }}; Erros={{ (disk_errors.stdout | from_json | json_query('value') | to_json) | default('N/A') }}; Desempenho={{ (disk_perf.stdout | from_json | json_query('value') | to_json) | default('N/A') }}"
         create: yes
       delegate_to: localhost
       when:

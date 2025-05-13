@@ -63,7 +63,8 @@
               }
             }
           }
-          $output | ConvertTo-Json -Depth 3
+          # Sempre retornar uma lista
+          ,$output | ConvertTo-Json -Depth 3
         } catch {
           Write-Output "[]"
         }
@@ -80,7 +81,7 @@
     - name: Debugar informações de volumes
       debug:
         msg: "Volume {{ item.DriveLetter }} em {{ inventory_hostname }}: Tamanho={{ item.SizeGB }}GB, Livre={{ item.FreeSpaceGB }}GB ({{ item.FreePercent }}%), Status={{ item.HealthStatus }}, Alerta={{ item.Alert }}"
-      loop: "{{ volume_info.stdout | from_json | list if volume_info.stdout | from_json is not sequence else volume_info.stdout | from_json }}"
+      loop: "{{ [volume_info.stdout | from_json] }}"
       when:
         - volume_info.stdout is defined
         - volume_info.stdout != ""
@@ -100,7 +101,8 @@
               Alert = if ($disk.HealthStatus -ne 'Healthy') { "Problema detectado: $($disk.HealthStatus)" } else { "OK" }
             }
           }
-          $output | ConvertTo-Json -Depth 3
+          # Sempre retornar uma lista
+          ,$output | ConvertTo-Json -Depth 3
         } catch {
           Write-Output "[]"
         }
@@ -112,7 +114,7 @@
     - name: Debugar status SMART
       debug:
         msg: "Disco {{ item.DeviceId }} ({{ item.Model }}) em {{ inventory_hostname }}: Status Operacional={{ item.OperationalStatus }}, Status SMART={{ item.HealthStatus }}, Alerta={{ item.Alert }}"
-      loop: "{{ smart_info.stdout | from_json | list if smart_info.stdout | from_json is not sequence else smart_info.stdout | from_json }}"
+      loop: "{{ [smart_info.stdout | from_json] }}"
       when:
         - smart_info.stdout is defined
         - smart_info.stdout != ""
@@ -133,7 +135,8 @@
               Level = $event.LevelDisplayName
             }
           }
-          $output | ConvertTo-Json -Depth 3
+          # Sempre retornar uma lista
+          ,$output | ConvertTo-Json -Depth 3
         } catch {
           Write-Output "[]"
         }
@@ -145,7 +148,7 @@
     - name: Debugar erros de disco
       debug:
         msg: "Erro de disco em {{ inventory_hostname }} às {{ item.TimeCreated }}: ID={{ item.EventId }}, Nível={{ item.Level }}, Mensagem={{ item.Message }}"
-      loop: "{{ disk_errors.stdout | from_json | list if disk_errors.stdout | from_json is not sequence else disk_errors.stdout | from_json }}"
+      loop: "{{ [disk_errors.stdout | from_json] }}"
       when:
         - disk_errors.stdout is defined
         - disk_errors.stdout != ""
@@ -166,7 +169,8 @@
               Alert = if ($disk.AvgDiskSecPerRead -gt 25 -or $disk.AvgDiskSecPerWrite -gt 25) { "Latência alta detectada" } elseif ($disk.DiskReadErrors -gt 0 -or $disk.DiskWriteErrors -gt 0) { "Erros de leitura/escrita detectados" } else { "OK" }
             }
           }
-          $output | ConvertTo-Json -Depth 3
+          # Sempre retornar uma lista
+          ,$output | ConvertTo-Json -Depth 3
         } catch {
           Write-Output "[]"
         }
@@ -178,7 +182,7 @@
     - name: Debugar métricas de desempenho
       debug:
         msg: "Disco {{ item.Name }} em {{ inventory_hostname }}: Latência Leitura={{ item.AvgDiskSecPerRead }}ms, Latência Escrita={{ item.AvgDiskSecPerWrite }}ms, Erros Leitura={{ item.DiskReadErrors }}, Erros Escrita={{ item.DiskWriteErrors }}, Alerta={{ item.Alert }}"
-      loop: "{{ disk_perf.stdout | from_json | list if disk_perf.stdout | from_json is not sequence else disk_perf.stdout | from_json }}"
+      loop: "{{ [disk_perf.stdout | from_json] }}"
       when:
         - disk_perf.stdout is defined
         - disk_perf.stdout != ""
@@ -188,10 +192,10 @@
       debug:
         msg: |
           Resumo de alertas em {{ inventory_hostname }}:
-          - Volumes: {{ (volume_info.stdout | from_json | default([]) | select('Alert', 'ne', 'OK') | list | length) }} alertas
-          - SMART: {{ (smart_info.stdout | from_json | default([]) | select('Alert', 'ne', 'OK') | list | length) }} alertas
-          - Erros de Disco: {{ (disk_errors.stdout | from_json | default([]) | list | length) }} erros
-          - Desempenho: {{ (disk_perf.stdout | from_json | default([]) | select('Alert', 'ne', 'OK') | list | length) }} alertas
+          - Volumes: {{ (volume_info.stdout | from_json | select('Alert', 'ne', 'OK') | list | length) }} alertas
+          - SMART: {{ (smart_info.stdout | from_json | select('Alert', 'ne', 'OK') | list | length) }} alertas
+          - Erros de Disco: {{ (disk_errors.stdout | from_json | list | length) }} erros
+          - Desempenho: {{ (disk_perf.stdout | from_json | select('Alert', 'ne', 'OK') | list | length) }} alertas
       when:
         - volume_info.stdout is defined or smart_info.stdout is defined or disk_errors.stdout is defined or disk_perf.stdout is defined
 

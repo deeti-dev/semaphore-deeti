@@ -1,0 +1,271 @@
+---
+- name: Verificar a saúde dos discos em máquinas Windows
+  hosts: daca
+  gather_facts: yes
+  ignore_unreachable: yes
+  vars:
+    free_space_threshold: 10  # Porcentagem mínima de espaço livre (alertar se < 10%)
+    log_path: /tmp/disk_health_report.log  # Caminho para o log no controlador
+    winrm_port: 5985  # Porta padrão do WinRM
+  tasks:
+    - name: Gathering Facts
+      setup:
+        gather_subset: min
+        timeout: 120
+      ignore_errors: yes
+
+    - name: Verificar conectividade na porta WinRM
+      ansible.builtin.wait_for:
+        host: "{{ inventory_hostname }}"
+        port: "{{ winrm_port }}"
+        state: started
+        timeout: 60
+        connect_timeout: 60
+      register: winrm_connect
+      ignore_errors: yes
+      ignore_unreachable: yes
+      delegate_to: localhost
+
+    - name: Logar erro de conectividade
+      debug:
+        msg: "Erro de conectividade na porta {{ winrm_port }} em {{ inventory_hostname }}: {{ winrm_connect.msg | default('Falha ao conectar') }}"
+      when: winrm_connect.failed is defined and winrm_connect.failed
+
+    - name: Registrar hosts inacessíveis
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Erro de conectividade - {{ winrm_connect.msg | default('Falha ao conectar') }}"
+        create: yes
+      delegate_to: localhost
+      when: winrm_connect.failed is defined and winrm_connect.failed
+
+    - name: Verificar carga do host
+      win_shell: |
+        $cpu = (Get-Counter -Counter "\Processor(_Total)\% Processor Time").CounterSamples.CookedValue
+        if ($cpu -gt 80) { Write-Output "CPU alta: $cpu percent" }
+        else { Write-Output "CPU OK: $cpu percent" }
+      register: cpu_load
+      ignore_errors: yes
+      timeout: 120
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
+
+    - name: Pular se CPU alta
+      meta: end_host
+      when: cpu_load.stdout is defined and "CPU alta" in cpu_load.stdout
+
+    - name: Verificar status do serviço WinRM
+      win_shell: Get-Service -Name WinRM | Select-Object -Property Name, Status, StartType | ConvertTo-Json
+      register: winrm_service
+      ignore_errors: yes
+      timeout: 120
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
+
+    - name: Logar status do serviço WinRM
+      debug:
+        msg: "Status do serviço WinRM em {{ inventory_hostname }}: {{ (winrm_service.stdout | from_json).Status | default('Desconhecido') }}"
+      when: winrm_service.stdout is defined and winrm_service.stdout != ""
+
+    - name: Coletar informações de volumes
+      win_shell: |
+        try {
+          $volumes = Get-Volume | Where-Object { $_.DriveLetter -and $_.FileSystemType -eq 'NTFS' -and $_.OperationalStatus -eq 'OK' } | Sort-Object DriveLetter
+          $output = @()
+          if ($volumes) {
+            foreach ($vol in $volumes) {
+              $freePercent = [math]::Round(($vol.SizeRemaining / $vol.Size) * 100, 2)
+              $output += [PSCustomObject]@{
+                DriveLetter = $vol.DriveLetter
+                SizeGB = [math]::Round($vol.Size / 1GB, 2)
+                FreeSpaceGB = [math]::Round($vol.SizeRemaining / 1GB, 2)
+                FreePercent = $freePercent
+                HealthStatus = $vol.HealthStatus
+                Alert = if ($freePercent -lt {{ free_space_threshold }}) { "Espaço livre crítico (<{{ free_space_threshold }}%)" } else { "OK" }
+              }
+            }
+          }
+          [PSCustomObject]@{
+            value = $output
+            Count = $output.Count
+          } | ConvertTo-Json -Depth 2
+        } catch {
+          Write-Output '{"value": [], "Count": 0}'
+        }
+      register: volume_info
+      ignore_errors: yes
+      timeout: 120
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
+
+    - name: Debugar saída bruta de volume_info
+      debug:
+        msg: "Saída bruta de volume_info.stdout: {{ volume_info.stdout | default('Nenhuma saída') }}"
+      when: volume_info is defined
+
+    - name: Verificar se volume_info.stdout é JSON válido
+      ansible.builtin.set_fact:
+        volume_info_is_valid_json: "{{ volume_info.stdout | from_json | default(None) != None }}"
+      when: volume_info.stdout is defined and volume_info.stdout != ""
+
+    - name: Debugar informações de volumes
+      debug:
+        msg: "Volume {{ item.DriveLetter }} em {{ inventory_hostname }}: Tamanho={{ item.SizeGB }}GB, Livre={{ item.FreeSpaceGB }}GB ({{ item.FreePercent }}%), Status={{ item.HealthStatus }}, Alerta={{ item.Alert }}"
+      loop: "{{ volume_info.stdout | from_json | json_query('value') }}"
+      when:
+        - volume_info.stdout is defined
+        - volume_info.stdout != ""
+        - volume_info_is_valid_json | default(false)
+        - (volume_info.stdout | from_json | json_query('value') | length) > 0
+
+    - name: Coletar status SMART dos discos físicos
+      win_shell: |
+        try {
+          $disks = Get-PhysicalDisk | Sort-Object DeviceId
+          $output = @()
+          foreach ($disk in $disks) {
+            $output += [PSCustomObject]@{
+              DeviceId = $disk.DeviceId
+              Model = $disk.Model
+              OperationalStatus = $disk.OperationalStatus
+              HealthStatus = $disk.HealthStatus
+              Alert = if ($disk.HealthStatus -ne 'Healthy') { "Problema detectado: $($disk.HealthStatus)" } else { "OK" }
+            }
+          }
+          [PSCustomObject]@{
+            value = $output
+            Count = $output.Count
+          } | ConvertTo-Json -Depth 2
+        } catch {
+          Write-Output '{"value": [], "Count": 0}'
+        }
+      register: smart_info
+      ignore_errors: yes
+      timeout: 120
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
+
+    - name: Verificar se smart_info.stdout é JSON válido
+      ansible.builtin.set_fact:
+        smart_info_is_valid_json: "{{ smart_info.stdout | from_json | default(None) != None }}"
+      when: smart_info.stdout is defined and smart_info.stdout != ""
+
+    - name: Debugar status SMART
+      debug:
+        msg: "Disco {{ item.DeviceId }} ({{ item.Model }}) em {{ inventory_hostname }}: Status Operacional={{ item.OperationalStatus }}, Status SMART={{ item.HealthStatus }}, Alerta={{ item.Alert }}"
+      loop: "{{ smart_info.stdout | from_json | json_query('value') }}"
+      when:
+        - smart_info.stdout is defined
+        - smart_info.stdout != ""
+        - smart_info_is_valid_json | default(false)
+        - (smart_info.stdout | from_json | json_query('value') | length) > 0
+
+    - name: Verificar erros de disco no log de eventos
+      win_shell: |
+        try {
+          $events = Get-WinEvent -LogName "System" -MaxEvents 1000 -ErrorAction SilentlyContinue | Where-Object {
+            $_.ProviderName -eq "Disk" -and $_.LevelDisplayName -in @("Error", "Critical")
+          }
+          $output = @()
+          foreach ($event in $events) {
+            $output += [PSCustomObject]@{
+              TimeCreated = $event.TimeCreated
+              EventId = $event.Id
+              Message = $event.Message
+              Level = $event.LevelDisplayName
+            }
+          }
+          [PSCustomObject]@{
+            value = $output
+            Count = $output.Count
+          } | ConvertTo-Json -Depth 2
+        } catch {
+          Write-Output '{"value": [], "Count": 0}'
+        }
+      register: disk_errors
+      ignore_errors: yes
+      timeout: 120
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
+
+    - name: Verificar se disk_errors.stdout é JSON válido
+      ansible.builtin.set_fact:
+        disk_errors_is_valid_json: "{{ disk_errors.stdout | from_json | default(None) != None }}"
+      when: disk_errors.stdout is defined and disk_errors.stdout != ""
+
+    - name: Debugar erros de disco
+      debug:
+        msg: "Erro de disco em {{ inventory_hostname }} às {{ item.TimeCreated }}: ID={{ item.EventId }}, Nível={{ item.Level }}, Mensagem={{ item.Message }}"
+      loop: "{{ disk_errors.stdout | from_json | json_query('value') }}"
+      when:
+        - disk_errors.stdout is defined
+        - disk_errors.stdout != ""
+        - disk_errors_is_valid_json | default(false)
+        - (disk_errors.stdout | from_json | json_query('value') | length) > 0
+
+    - name: Coletar métricas de desempenho do disco
+      win_shell: |
+        try {
+          $diskPerf = Get-CimInstance Win32_PerfFormattedData_PerfDisk_PhysicalDisk | Where-Object { $_.Name -ne "_Total" } | Sort-Object Name
+          $output = @()
+          foreach ($disk in $diskPerf) {
+            $output += [PSCustomObject]@{
+              Name = $disk.Name
+              AvgDiskSecPerRead = [math]::Round($disk.AvgDiskSecPerRead / 1000, 3)
+              AvgDiskSecPerWrite = [math]::Round($disk.AvgDiskSecPerWrite / 1000, 3)
+              DiskReadErrors = [int](if ($null -eq $disk.DiskReadErrors) { 0 } else { $disk.DiskReadErrors })
+              DiskWriteErrors = [int](if ($null -eq $disk.DiskWriteErrors) { 0 } else { $disk.DiskWriteErrors })
+              Alert = if ($disk.AvgDiskSecPerRead -gt 25 -or $disk.AvgDiskSecPerWrite -gt 25) { "Latência alta detectada" } elseif ($disk.DiskReadErrors -gt 0 -or $disk.DiskWriteErrors -gt 0) { "Erros de leitura/escrita detectados" } else { "OK" }
+            }
+          }
+          [PSCustomObject]@{
+            value = $output
+            Count = $output.Count
+          } | ConvertTo-Json -Depth 2
+        } catch {
+          Write-Output '{"value": [], "Count": 0}'
+        }
+      register: disk_perf
+      ignore_errors: yes
+      timeout: 120
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
+
+    - name: Verificar se disk_perf.stdout é JSON válido
+      ansible.builtin.set_fact:
+        disk_perf_is_valid_json: "{{ disk_perf.stdout | from_json | default(None) != None }}"
+      when: disk_perf.stdout is defined and disk_perf.stdout != ""
+
+    - name: Debugar saída bruta de disk_perf
+      debug:
+        msg: "Saída bruta de disk_perf.stdout: {{ disk_perf.stdout | default('Nenhuma saída') }}"
+      when: disk_perf is defined
+
+    - name: Debugar métricas de desempenho
+      debug:
+        msg: "Disco {{ item.Name }} em {{ inventory_hostname }}: Latência Leitura={{ item.AvgDiskSecPerRead }}ms, Latência Escrita={{ item.AvgDiskSecPerWrite }}ms, Erros Leitura={{ item.DiskReadErrors | default(0) }}, Erros Escrita={{ item.DiskWriteErrors | default(0) }}, Alerta={{ item.Alert }}"
+      loop: "{{ disk_perf.stdout | from_json | json_query('value') }}"
+      when:
+        - disk_perf.stdout is defined
+        - disk_perf.stdout != ""
+        - disk_perf_is_valid_json | default(false)
+        - (disk_perf.stdout | from_json | json_query('value') | length) > 0
+
+    - name: Debugar resultados de json_query para disk_perf
+      debug:
+        msg: "Resultado de json_query para disk_perf: {{ disk_perf.stdout | default('') | from_json | default({'value': []}) | json_query('value[?Alert != `OK`]') }}"
+      when: disk_perf.stdout is defined
+
+    - name: Resumir alertas
+      debug:
+        msg: |
+          Resumo de alertas em {{ inventory_hostname }}:
+          - Volumes: {{ (volume_info.stdout | default('') | from_json | default({'value': []}) | json_query('value[?Alert != `OK`]') | length) }} alertas
+          - SMART: {{ (smart_info.stdout | default('') | from_json | default({'value': []}) | json_query('value[?Alert != `OK`]') | length) }} alertas
+          - Erros de Disco: {{ (disk_errors.stdout | default('') | from_json | default({'value': []}) | json_query('value') | length) }} erros
+          - Desempenho: {{ (disk_perf.stdout | default('') | from_json | default({'value': []}) | json_query('value[?Alert != `OK`]') | length) }} alertas
+      when:
+        - volume_info.stdout is defined or smart_info.stdout is defined or disk_errors.stdout is defined or disk_perf.stdout is defined
+
+    - name: Registrar resultados no log
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Volumes={{ (volume_info.stdout | from_json | json_query('value') | default([]) | to_json) | default('N/A') }}; SMART={{ (smart_info.stdout | from_json | json_query('value') | default([]) | to_json) | default('N/A') }}; Erros={{ (disk_errors.stdout | from_json | json_query('value') | default([]) | to_json) | default('N/A') }}; Desempenho={{ (disk_perf.stdout | from_json | json_query('value') | default([]) | to_json) | default('N/A') }}"
+        create: yes
+      delegate_to: localhost
+      when:
+        - volume_info.stdout is defined or smart_info.stdout is defined or disk_errors.stdout is defined or disk_perf.stdout is defined

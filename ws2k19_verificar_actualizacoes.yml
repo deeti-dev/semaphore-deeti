@@ -1,24 +1,57 @@
 ---
 - name: Verificar atualizações nas máquinas dos colaboradores
-  hosts: ws2k19  # Altere para o grupo de máquinas de colaboradores no seu inventário
-  gather_facts: no  # Não coletamos fatos, já que estamos apenas verificando atualizações
-
+  hosts: ws2k19  # Grupo de máquinas de colaboradores
+  gather_facts: no
+  ignore_unreachable: yes  # Ignora hosts inacessíveis para não falhar o playbook
+  vars:
+    log_path: /tmp/update_check_report.log  # Caminho para log de erros
   tasks:
+    - name: Verificar conectividade na porta WinRM
+      ansible.builtin.wait_for:
+        host: "{{ inventory_hostname }}"
+        port: 5985  # Porta padrão do WinRM
+        state: started
+        timeout: 60
+        connect_timeout: 60
+      register: winrm_connect
+      ignore_errors: yes
+      ignore_unreachable: yes
+      delegate_to: localhost
+
+    - name: Logar erro de conectividade
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Erro de conectividade - {{ winrm_connect.msg | default('Falha ao conectar') }}"
+        create: yes
+      delegate_to: localhost
+      when: winrm_connect.failed is defined and winrm_connect.failed
+
     - name: Verificar atualizações pendentes
       win_updates:
-        state: searched  # Apenas pesquisa as atualizações, sem instalá-las
-      register: update_result  # Armazenamos o resultado em uma variável
+        state: searched  # Apenas pesquisa as atualizações
+      register: update_result
+      ignore_errors: yes
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
 
     - name: Exibir as atualizações encontradas
       debug:
-        var: update_result.updates  # Exibe as atualizações encontradas
+        var: update_result.updates
+      when: update_result.updates is defined and update_result.updates | length > 0
 
     - name: Verificar se há atualizações falhadas
       debug:
         msg: "Atualizações falhadas: {{ update_result.failed_update_count }}"
-      when: update_result.failed_update_count > 0  # Se houver falhas, mostra o número
+      when: update_result.failed_update_count is defined and update_result.failed_update_count > 0
 
     - name: Verificar se há atualizações encontradas
       debug:
         msg: "Foram encontradas as seguintes atualizações: {{ update_result.found_update_count }}"
-      when: update_result.found_update_count > 0  # Se houver atualizações encontradas, mostra o número
+      when: update_result.found_update_count is defined and update_result.found_update_count > 0
+
+    - name: Registrar resultados no log
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Atualizações encontradas={{ update_result.found_update_count | default(0) }}, Atualizações falhadas={{ update_result.failed_update_count | default(0) }}, Detalhes={{ update_result.updates | default({}) | to_json }}"
+        create: yes
+      delegate_to: localhost
+      when: update_result is defined

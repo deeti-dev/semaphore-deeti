@@ -1,15 +1,15 @@
 ---
-- name: Verificar atualizações nas máquinas dos colaboradores
-  hosts: ws2k19  # Grupo de máquinas de colaboradores
+- name: Verificar e instalar atualizações nos Servidores WS2k19
+  hosts: ws2k19
   gather_facts: no
-  ignore_unreachable: yes  # Ignora hosts inacessíveis para não falhar o playbook
+  ignore_unreachable: yes
   vars:
-    log_path: /tmp/update_check_report.log  # Caminho para log de erros
+    log_path: /tmp/update_check_report.log
   tasks:
     - name: Verificar conectividade na porta WinRM
       ansible.builtin.wait_for:
         host: "{{ inventory_hostname }}"
-        port: 5985  # Porta padrão do WinRM
+        port: 5985
         state: started
         timeout: 60
         connect_timeout: 60
@@ -28,7 +28,10 @@
 
     - name: Verificar atualizações pendentes
       win_updates:
-        state: searched  # Apenas pesquisa as atualizações
+        state: searched  # Primeiro, apenas verifica as atualizações
+        category_names:
+          - SecurityUpdates
+          - UpdateRollups
       register: update_result
       ignore_errors: yes
       when: winrm_connect.failed is not defined or not winrm_connect.failed
@@ -38,20 +41,47 @@
         var: update_result.updates
       when: update_result.updates is defined and update_result.updates | length > 0
 
-    - name: Verificar se há atualizações falhadas
-      debug:
-        msg: "Atualizações falhadas: {{ update_result.failed_update_count }}"
-      when: update_result.failed_update_count is defined and update_result.failed_update_count > 0
+    - name: Instalar atualizações pendentes
+      win_updates:
+        state: installed  # Instala as atualizações
+        category_names:
+          - SecurityUpdates
+          - UpdateRollups
+      register: install_result
+      ignore_errors: yes
+      when:
+        - winrm_connect.failed is not defined or not winrm_connect.failed
+        - update_result.found_update_count is defined and update_result.found_update_count > 0
 
-    - name: Verificar se há atualizações encontradas
+    - name: Verificar necessidade de reinicialização
       debug:
-        msg: "Foram encontradas as seguintes atualizações: {{ update_result.found_update_count }}"
-      when: update_result.found_update_count is defined and update_result.found_update_count > 0
+        msg: "{{ inventory_hostname }} precisa reiniciar: {{ install_result.reboot_required | default(false) }}"
+      when:
+        - install_result is defined
+        - install_result.reboot_required is defined
+
+    - name: Registrar necessidade de reinicialização no log
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Reboot necessário={{ install_result.reboot_required | default(false) }}"
+        create: yes
+      delegate_to: localhost
+      when:
+        - install_result is defined
+        - install_result.reboot_required is defined and install_result.reboot_required
+
+    - name: Reiniciar o servidor se necessário
+      win_reboot:
+        reboot_timeout: 600  # Tempo máximo para reinicialização (10 minutos)
+      when:
+        - install_result is defined
+        - install_result.reboot_required is defined and install_result.reboot_required
+      ignore_errors: yes
 
     - name: Registrar resultados no log
       ansible.builtin.lineinfile:
         path: "{{ log_path }}"
-        line: "{{ inventory_hostname }}: Atualizações encontradas={{ update_result.found_update_count | default(0) }}, Atualizações falhadas={{ update_result.failed_update_count | default(0) }}, Detalhes={{ update_result.updates | default({}) | to_json }}"
+        line: "{{ inventory_hostname }}: Atualizações encontradas={{ update_result.found_update_count | default(0) }}, Atualizações instaladas={{ install_result.installed_update_count | default(0) }}, Reboot necessário={{ install_result.reboot_required | default(false) }}, Detalhes={{ update_result.updates | default({}) | to_json }}"
         create: yes
       delegate_to: localhost
-      when: update_result is defined
+      when: update_result is defined or install_result is defined

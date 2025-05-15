@@ -5,8 +5,7 @@
   vars:
     target_user: "erica.santos"
     log_path: "/tmp/wazuh_alert_investigation.log"
-    event_time: "2025-05-15T07:32:24"
-    time_window_minutes: 120  # Aumentado para 2 horas
+    sysmon_install_time: "2025-05-15T12:18:00"  # Horário aproximado da instalação do Sysmon
   tasks:
     - name: Verificar conectividade na porta WinRM
       ansible.builtin.wait_for:
@@ -45,7 +44,7 @@
 
     - name: Verificar configuração de auditoria de logon
       win_shell: |
-        auditpol /get /subcategory:"Logon" | Out-String
+        auditpol /get /category:"Logon/Logoff" | Out-String
       register: audit_policy
       ignore_errors: yes
       when: winrm_connect.failed is not defined or not winrm_connect.failed
@@ -68,15 +67,15 @@
 
     - name: Aumentar tamanho do log de segurança
       win_shell: |
-        wevtutil sl Security /ms:104857600
+        wevtutil sl Security /ms:209715200  # 200 MB
       ignore_errors: yes
       when: winrm_connect.failed is not defined or not winrm_connect.failed
 
     - name: Coletar eventos de logon malsucedidos (eventID 4625)
       win_shell: |
         try {
-          $startTime = (Get-Date "{{ event_time }}").AddMinutes(-{{ time_window_minutes }})
-          $endTime = (Get-Date "{{ event_time }}").AddMinutes({{ time_window_minutes }})
+          $startTime = (Get-Date "2025-05-15T07:32:24").AddMinutes(-240)
+          $endTime = (Get-Date "2025-05-15T07:32:24").AddMinutes(240)
           $events = Get-WinEvent -FilterHashtable @{
             LogName = 'Security'
             ID = 4625
@@ -125,8 +124,8 @@
     - name: Verificar eventos de bloqueio manualmente (eventID 4740)
       win_shell: |
         try {
-          $startTime = (Get-Date "{{ event_time }}").AddMinutes(-{{ time_window_minutes }})
-          $endTime = (Get-Date "{{ event_time }}").AddMinutes({{ time_window_minutes }})
+          $startTime = (Get-Date "2025-05-15T07:32:24").AddMinutes(-240)
+          $endTime = (Get-Date "2025-05-15T07:32:24").AddMinutes(240)
           $events = Get-WinEvent -FilterHashtable @{
             LogName = 'Security'
             ID = 4740
@@ -167,8 +166,8 @@
     - name: Coletar eventos Sysmon (eventID 1) para processos do usuário
       win_shell: |
         try {
-          $startTime = (Get-Date "{{ event_time }}").AddMinutes(-{{ time_window_minutes }})
-          $endTime = (Get-Date "{{ event_time }}").AddMinutes({{ time_window_minutes }})
+          $startTime = Get-Date "{{ sysmon_install_time }}"
+          $endTime = Get-Date
           $events = Get-WinEvent -FilterHashtable @{
             LogName = 'Microsoft-Windows-Sysmon/Operational'
             ID = 1
@@ -188,10 +187,10 @@
               Name='ParentProcessName'; Expression={$_.Properties[12].Value}
             } | ConvertTo-Json -Depth 3
           } else {
-            Write-Output '{"events": [], "message": "Nenhum evento Sysmon encontrado para {{ target_user }}"}'
+            Write-Output '{"events": [], "message": "Nenhum evento Sysmon encontrado para {{ target_user }} desde {{ sysmon_install_time }}"}'
           }
         } catch {
-          Write-Output '{"events": [], "message": "Sysmon não instalado ou erro: $($_.Exception.Message)"}'
+          Write-Output '{"events": [], "message": "Erro ao coletar eventos Sysmon: $($_.Exception.Message)"}'
         }
       register: sysmon_events
       ignore_errors: yes
@@ -209,6 +208,35 @@
         create: yes
       delegate_to: localhost
       when: sysmon_events is defined
+
+    - name: Verificar todos os serviços
+      win_shell: |
+        try {
+          $services = Get-WmiObject -Class Win32_Service | Select-Object Name, PathName, StartName, State
+          if ($services) {
+            $services | ConvertTo-Json -Depth 3
+          } else {
+            Write-Output '{"services": [], "message": "Nenhum serviço encontrado"}'
+          }
+        } catch {
+          Write-Output '{"services": [], "message": "Erro ao coletar serviços: $($_.Exception.Message)"}'
+        }
+      register: all_services
+      ignore_errors: yes
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
+
+    - name: Exibir todos os serviços
+      debug:
+        var: all_services.stdout
+      when: all_services.stdout is defined and all_services.stdout | length > 0
+
+    - name: Registrar todos os serviços no log
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Todos os serviços={{ all_services.stdout | default('Nenhum serviço encontrado') }}"
+        create: yes
+      delegate_to: localhost
+      when: all_services is defined
 
     - name: Verificar serviços do PRIMAVERA
       win_shell: |
@@ -346,9 +374,55 @@
       delegate_to: localhost
       when: network_connections is defined
 
+    - name: Monitorar eventos de logon malsucedidos em tempo real
+      win_shell: |
+        try {
+          $events = Get-WinEvent -FilterHashtable @{
+            LogName = 'Security'
+            ID = 4625
+          } -MaxEvents 10 -ErrorAction SilentlyContinue | Where-Object {
+            $_.Properties[5].Value -eq "{{ target_user }}"
+          }
+          if ($events) {
+            $events | Select-Object TimeCreated, @{
+              Name='AccountName'; Expression={$_.Properties[5].Value}
+            }, @{
+              Name='AccountDomain'; Expression={$_.Properties[6].Value}
+            }, @{
+              Name='FailureReason'; Expression={$_.Properties[19].Value}
+            }, @{
+              Name='SourceIPAddress'; Expression={$_.Properties[18].Value}
+            }, @{
+              Name='ProcessName'; Expression={$_.Properties[14].Value}
+            }, @{
+              Name='WorkstationName'; Expression={$_.Properties[10].Value}
+            } | ConvertTo-Json -Depth 3
+          } else {
+            Write-Output '{"events": [], "message": "Nenhum evento 4625 recente encontrado para {{ target_user }}"}'
+          }
+        } catch {
+          Write-Output '{"events": [], "message": "Erro ao coletar eventos recentes: $($_.Exception.Message)"}'
+        }
+      register: recent_logon_failures
+      ignore_errors: yes
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
+
+    - name: Exibir eventos recentes de logon malsucedidos
+      debug:
+        var: recent_logon_failures.stdout
+      when: recent_logon_failures.stdout is defined and recent_logon_failures.stdout | length > 0
+
+    - name: Registrar eventos recentes de logon malsucedidos no log
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Logon malsucedidos recentes={{ recent_logon_failures.stdout | default('Nenhum evento encontrado') }}"
+        create: yes
+      delegate_to: localhost
+      when: recent_logon_failures is defined
+
     - name: Resumo da investigação
       ansible.builtin.lineinfile:
         path: "{{ log_path }}"
-        line: "{{ inventory_hostname }}: Resumo - Logon malsucedidos={{ logon_failures.stdout | default('Nenhum') }}, Bloqueios={{ lockout_events.stdout | default('Nenhum') }}, Sysmon={{ sysmon_events.stdout | default('Nenhum') }}, PRIMAVERA={{ primavera_services.stdout | default('Nenhum') }}, Sessões={{ user_sessions.stdout | default('Nenhuma') }}, Processos={{ user_processes.stdout | default('Nenhum') }}, Conexões={{ network_connections.stdout | default('Nenhuma') }}"
+        line: "{{ inventory_hostname }}: Resumo - Logon malsucedidos={{ logon_failures.stdout | default('Nenhum') }}, Bloqueios={{ lockout_events.stdout | default('Nenhum') }}, Sysmon={{ sysmon_events.stdout | default('Nenhum') }}, Todos os serviços={{ all_services.stdout | default('Nenhum') }}, PRIMAVERA={{ primavera_services.stdout | default('Nenhum') }}, Sessões={{ user_sessions.stdout | default('Nenhuma') }}, Processos={{ user_processes.stdout | default('Nenhum') }}, Conexões={{ network_connections.stdout | default('Nenhuma') }}, Logon malsucedidos recentes={{ recent_logon_failures.stdout | default('Nenhum') }}"
         create: yes
       delegate_to: localhost

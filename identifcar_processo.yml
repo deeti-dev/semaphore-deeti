@@ -5,8 +5,8 @@
   vars:
     target_user: "erica.santos"
     log_path: "/tmp/wazuh_alert_investigation.log"
-    event_time: "2025-05-13T12:09:47"  # Horário do evento de bloqueio
-    time_window_minutes: 30  # Janela de tempo para buscar eventos (antes e depois)
+    event_time: "2025-05-15T07:32:24"  # Atualizado para o novo evento
+    time_window_minutes: 30
   tasks:
     - name: Verificar conectividade na porta WinRM
       ansible.builtin.wait_for:
@@ -28,35 +28,70 @@
       delegate_to: localhost
       when: winrm_connect.failed is defined and winrm_connect.failed
 
+    - name: Verificar configuração de auditoria de logon
+      win_shell: |
+        auditpol /get /subcategory:"Logon" | Out-String
+      register: audit_policy
+      ignore_errors: yes
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
+
+    - name: Registrar configuração de auditoria
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Configuração de auditoria={{ audit_policy.stdout | default('N/A') }}"
+        create: yes
+      delegate_to: localhost
+      when: audit_policy.stdout is defined
+
+    - name: Habilitar auditoria de logon malsucedido
+      win_shell: |
+        auditpol /set /subcategory:"Logon" /failure:enable
+      ignore_errors: yes
+      when:
+        - winrm_connect.failed is not defined or not winrm_connect.failed
+        - audit_policy.stdout is defined and 'Failure' not in audit_policy.stdout
+
     - name: Coletar eventos de logon malsucedidos (eventID 4625)
       win_shell: |
-        $startTime = (Get-Date "{{ event_time }}").AddMinutes(-{{ time_window_minutes }})
-        $endTime = (Get-Date "{{ event_time }}").AddMinutes({{ time_window_minutes }})
-        Get-WinEvent -FilterHashtable @{
-          LogName = 'Security'
-          ID = 4625
-          StartTime = $startTime
-          EndTime = $endTime
-        } -ErrorAction SilentlyContinue | Where-Object {
-          $_.Properties[5].Value -eq "{{ target_user }}"
-        } | Select-Object TimeCreated, @{
-          Name='AccountName'; Expression={$_.Properties[5].Value}
-        }, @{
-          Name='AccountDomain'; Expression={$_.Properties[6].Value}
-        }, @{
-          Name='FailureReason'; Expression={$_.Properties[19].Value}
-        }, @{
-          Name='SourceIPAddress'; Expression={$_.Properties[18].Value}
-        }, @{
-          Name='ProcessName'; Expression={$_.Properties[14].Value}
-        } | ConvertTo-Json
+        try {
+          $startTime = (Get-Date "{{ event_time }}").AddMinutes(-{{ time_window_minutes }})
+          $endTime = (Get-Date "{{ event_time }}").AddMinutes({{ time_window_minutes }})
+          $events = Get-WinEvent -FilterHashtable @{
+            LogName = 'Security'
+            ID = 4625
+            StartTime = $startTime
+            EndTime = $endTime
+          } -ErrorAction SilentlyContinue | Where-Object {
+            $_.Properties[5].Value -eq "{{ target_user }}" -and
+            $_.Properties[10].Value -eq "INACOM-DAFSG-21"
+          }
+          if ($events) {
+            $events | Select-Object TimeCreated, @{
+              Name='AccountName'; Expression={$_.Properties[5].Value}
+            }, @{
+              Name='AccountDomain'; Expression={$_.Properties[6].Value}
+            }, @{
+              Name='FailureReason'; Expression={$_.Properties[19].Value}
+            }, @{
+              Name='SourceIPAddress'; Expression={$_.Properties[18].Value}
+            }, @{
+              Name='ProcessName'; Expression={$_.Properties[14].Value}
+            }, @{
+              Name='WorkstationName'; Expression={$_.Properties[10].Value}
+            } | ConvertTo-Json -Depth 3
+          } else {
+            Write-Output '{"events": [], "message": "Nenhum evento 4625 encontrado para {{ target_user }} em INACOM-DAFSG-21"}'
+          }
+        } catch {
+          Write-Output '{"events": [], "message": "Erro ao coletar eventos: $($_.Exception.Message)"}'
+        }
       register: logon_failures
       ignore_errors: yes
       when: winrm_connect.failed is not defined or not winrm_connect.failed
 
     - name: Exibir eventos de logon malsucedidos
       debug:
-        var: logon_failures.stdout_lines
+        var: logon_failures.stdout
       when: logon_failures.stdout is defined and logon_failures.stdout | length > 0
 
     - name: Registrar eventos de logon malsucedidos no log
@@ -67,24 +102,114 @@
       delegate_to: localhost
       when: logon_failures is defined
 
+    - name: Coletar eventos Sysmon (eventID 1) para processos do usuário
+      win_shell: |
+        try {
+          $startTime = (Get-Date "{{ event_time }}").AddMinutes(-{{ time_window_minutes }})
+          $endTime = (Get-Date "{{ event_time }}").AddMinutes({{ time_window_minutes }})
+          $events = Get-WinEvent -FilterHashtable @{
+            LogName = 'Microsoft-Windows-Sysmon/Operational'
+            ID = 1
+            StartTime = $startTime
+            EndTime = $endTime
+          } -ErrorAction SilentlyContinue | Where-Object {
+            $_.Properties[13].Value -eq "{{ target_user }}"
+          }
+          if ($events) {
+            $events | Select-Object TimeCreated, @{
+              Name='ProcessName'; Expression={$_.Properties[4].Value}
+            }, @{
+              Name='ProcessId'; Expression={$_.Properties[8].Value}
+            }, @{
+              Name='Image'; Expression={$_.Properties[10].Value}
+            }, @{
+              Name='ParentProcessName'; Expression={$_.Properties[12].Value}
+            } | ConvertTo-Json -Depth 3
+          } else {
+            Write-Output '{"events": [], "message": "Nenhum evento Sysmon encontrado para {{ target_user }}"}'
+          }
+        } catch {
+          Write-Output '{"events": [], "message": "Sysmon não instalado ou erro: $($_.Exception.Message)"}'
+        }
+      register: sysmon_events
+      ignore_errors: yes
+      when:
+        - winrm_connect.failed is not defined or not winrm_connect.failed
+        - inventory_hostname == "INACOM-DAFSG-21"
+
+    - name: Exibir eventos Sysmon
+      debug:
+        var: sysmon_events.stdout
+      when: sysmon_events.stdout is defined and sysmon_events.stdout | length > 0
+
+    - name: Registrar eventos Sysmon no log
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Eventos Sysmon={{ sysmon_events.stdout | default('Nenhum evento encontrado') }}"
+        create: yes
+      delegate_to: localhost
+      when: sysmon_events is defined
+
+    - name: Verificar serviços do PRIMAVERA
+      win_shell: |
+        try {
+          $services = Get-WmiObject -Class Win32_Service -Filter "Name LIKE 'Primavera%' OR StartName LIKE '%{{ target_user }}%'" | Select-Object Name, PathName, StartName, State
+          if ($services) {
+            $services | ConvertTo-Json -Depth 3
+          } else {
+            Write-Output '{"services": [], "message": "Nenhum serviço PRIMAVERA ou associado a {{ target_user }} encontrado"}'
+          }
+        } catch {
+          Write-Output '{"services": [], "message": "Erro ao coletar serviços: $($_.Exception.Message)"}'
+        }
+      register: primavera_services
+      ignore_errors: yes
+      when:
+        - winrm_connect.failed is not defined or not winrm_connect.failed
+        - inventory_hostname == "INACOM-DAFSG-21"
+
+    - name: Exibir serviços do PRIMAVERA
+      debug:
+        var: primavera_services.stdout
+      when: primavera_services.stdout is defined and primavera_services.stdout | length > 0
+
+    - name: Registrar serviços do PRIMAVERA no log
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Serviços PRIMAVERA={{ primavera_services.stdout | default('Nenhum serviço encontrado') }}"
+        create: yes
+      delegate_to: localhost
+      when: primavera_services is defined
+
     - name: Verificar sessões ativas do usuário
       win_shell: |
-        qwinsta | Where-Object { $_ -match "{{ target_user }}" } | ForEach-Object {
-          $fields = $_ -split "\s+"
-          [PSCustomObject]@{
-            SessionName = $fields[1]
-            UserName = $fields[2]
-            SessionID = $fields[3]
-            State = $fields[4]
+        try {
+          $sessions = qwinsta | Where-Object { $_ -match "{{ target_user }}" }
+          if ($sessions) {
+            $sessions | ForEach-Object {
+              $fields = $_ -split "\s+"
+              [PSCustomObject]@{
+                SessionName = $fields[1]
+                UserName = $fields[2]
+                SessionID = $fields[3]
+                State = $fields[4]
+              }
+            } | ConvertTo-Json -Depth 3
+          } else {
+            Write-Output '{"sessions": [], "message": "Nenhuma sessão ativa para {{ target_user }}"}'
           }
-        } | ConvertTo-Json
+        } catch {
+          Write-Output '{"sessions": [], "message": "Erro ao coletar sessões: $($_.Exception.Message)"}'
+        }
       register: user_sessions
       ignore_errors: yes
-      when: winrm_connect.failed is not defined or not winrm_connect.failed
+      when:
+        - winrm_connect.failed is not defined or not winrm_connect.failed
+        - inventory_hostname == "INACOM-DAFSG-21"
 
     - name: Exibir sessões ativas do usuário
       debug:
-        var: user_sessions.stdout_lines
+        var: user_sessions.stdout
       when: user_sessions.stdout is defined and user_sessions.stdout | length > 0
 
     - name: Registrar sessões ativas no log
@@ -97,14 +222,27 @@
 
     - name: Coletar processos associados ao usuário
       win_shell: |
-        Get-Process -IncludeUserName | Where-Object { $_.UserName -match "{{ target_user }}" } | Select-Object ProcessName, Id, Path, StartTime | ConvertTo-Json
+        try {
+          $processes = Get-Process -IncludeUserName -ErrorAction SilentlyContinue | Where-Object { $_.UserName -match "{{ target_user }}" }
+          if ($processes) {
+            $processes | Select-Object ProcessName, Id, Path, StartTime, @{
+              Name='UserName'; Expression={$_.UserName}
+            } | ConvertTo-Json -Depth 3
+          } else {
+            Write-Output '{"processes": [], "message": "Nenhum processo encontrado para {{ target_user }}"}'
+          }
+        } catch {
+          Write-Output '{"processes": [], "message": "Erro ao coletar processos: $($_.Exception.Message)"}'
+        }
       register: user_processes
       ignore_errors: yes
-      when: winrm_connect.failed is not defined or not winrm_connect.failed
+      when:
+        - winrm_connect.failed is not defined or not winrm_connect.failed
+        - inventory_hostname == "INACOM-DAFSG-21"
 
     - name: Exibir processos associados ao usuário
       debug:
-        var: user_processes.stdout_lines
+        var: user_processes.stdout
       when: user_processes.stdout is defined and user_processes.stdout | length > 0
 
     - name: Registrar processos no log
@@ -118,6 +256,6 @@
     - name: Resumo da investigação
       ansible.builtin.lineinfile:
         path: "{{ log_path }}"
-        line: "{{ inventory_hostname }}: Resumo - Logon malsucedidos={{ logon_failures.stdout | default('Nenhum') }}, Sessões={{ user_sessions.stdout | default('Nenhuma') }}, Processos={{ user_processes.stdout | default('Nenhum') }}"
+        line: "{{ inventory_hostname }}: Resumo - Logon malsucedidos={{ logon_failures.stdout | default('Nenhum') }}, Sysmon={{ sysmon_events.stdout | default('Nenhum') | default('N/A') }}, PRIMAVERA={{ primavera_services.stdout | default('Nenhum') | default('N/A') }}, Sessões={{ user_sessions.stdout | default('Nenhuma') | default('N/A') }}, Processos={{ user_processes.stdout | default('Nenhum') | default('N/A') }}"
         create: yes
       delegate_to: localhost

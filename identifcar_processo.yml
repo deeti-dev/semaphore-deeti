@@ -1,6 +1,6 @@
 ---
 - name: Identificar processo gerando alerta de bloqueio de conta no Wazuh
-  hosts: maquina_especifa
+  hosts: maquina_especifica
   gather_facts: no
   vars:
     target_user: "erica.santos"

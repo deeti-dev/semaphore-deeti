@@ -1,12 +1,12 @@
 ---
 - name: Identificar processo gerando alerta de bloqueio de conta no Wazuh
-  hosts: maquina_especifica
+  hosts: maquina_especifa
   gather_facts: no
   vars:
     target_user: "erica.santos"
     log_path: "/tmp/wazuh_alert_investigation.log"
     event_time: "2025-05-15T07:32:24"
-    time_window_minutes: 60  # Aumentado para capturar mais eventos
+    time_window_minutes: 120  # Aumentado para 2 horas
   tasks:
     - name: Verificar conectividade na porta WinRM
       ansible.builtin.wait_for:
@@ -28,9 +28,24 @@
       delegate_to: localhost
       when: winrm_connect.failed is defined and winrm_connect.failed
 
+    - name: Listar subcategorias de auditoria disponíveis
+      win_shell: |
+        auditpol /list /subcategory:* | Out-String
+      register: audit_subcategories
+      ignore_errors: yes
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
+
+    - name: Registrar subcategorias de auditoria
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Subcategorias de auditoria={{ audit_subcategories.stdout | default('N/A') }}"
+        create: yes
+      delegate_to: localhost
+      when: audit_subcategories.stdout is defined
+
     - name: Verificar configuração de auditoria de logon
       win_shell: |
-        auditpol /get /subcategory:"Início de Sessão" | Out-String
+        auditpol /get /subcategory:"Logon" | Out-String
       register: audit_policy
       ignore_errors: yes
       when: winrm_connect.failed is not defined or not winrm_connect.failed
@@ -45,11 +60,17 @@
 
     - name: Habilitar auditoria de logon malsucedido
       win_shell: |
-        auditpol /set /subcategory:"Início de Sessão" /failure:enable
+        auditpol /set /subcategory:"Logon" /failure:enable
       ignore_errors: yes
       when:
         - winrm_connect.failed is not defined or not winrm_connect.failed
-        - audit_policy.stdout is defined and 'Falha' not in audit_policy.stdout
+        - audit_policy.stdout is defined and 'Failure' not in audit_policy.stdout
+
+    - name: Aumentar tamanho do log de segurança
+      win_shell: |
+        wevtutil sl Security /ms:104857600
+      ignore_errors: yes
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
 
     - name: Coletar eventos de logon malsucedidos (eventID 4625)
       win_shell: |
@@ -100,6 +121,48 @@
         create: yes
       delegate_to: localhost
       when: logon_failures is defined
+
+    - name: Verificar eventos de bloqueio manualmente (eventID 4740)
+      win_shell: |
+        try {
+          $startTime = (Get-Date "{{ event_time }}").AddMinutes(-{{ time_window_minutes }})
+          $endTime = (Get-Date "{{ event_time }}").AddMinutes({{ time_window_minutes }})
+          $events = Get-WinEvent -FilterHashtable @{
+            LogName = 'Security'
+            ID = 4740
+            StartTime = $startTime
+            EndTime = $endTime
+          } -ErrorAction SilentlyContinue | Where-Object {
+            $_.Properties[0].Value -eq "{{ target_user }}"
+          }
+          if ($events) {
+            $events | Select-Object TimeCreated, @{
+              Name='AccountName'; Expression={$_.Properties[0].Value}
+            }, @{
+              Name='CallerComputerName'; Expression={$_.Properties[6].Value}
+            } | ConvertTo-Json -Depth 3
+          } else {
+            Write-Output '{"events": [], "message": "Nenhum evento 4740 encontrado para {{ target_user }}"}'
+          }
+        } catch {
+          Write-Output '{"events": [], "message": "Erro ao coletar eventos 4740: $($_.Exception.Message)"}'
+        }
+      register: lockout_events
+      ignore_errors: yes
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
+
+    - name: Exibir eventos de bloqueio
+      debug:
+        var: lockout_events.stdout
+      when: lockout_events.stdout is defined and lockout_events.stdout | length > 0
+
+    - name: Registrar eventos de bloqueio no log
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Eventos de bloqueio={{ lockout_events.stdout | default('Nenhum evento encontrado') }}"
+        create: yes
+      delegate_to: localhost
+      when: lockout_events is defined
 
     - name: Coletar eventos Sysmon (eventID 1) para processos do usuário
       win_shell: |
@@ -286,6 +349,6 @@
     - name: Resumo da investigação
       ansible.builtin.lineinfile:
         path: "{{ log_path }}"
-        line: "{{ inventory_hostname }}: Resumo - Logon malsucedidos={{ logon_failures.stdout | default('Nenhum') }}, Sysmon={{ sysmon_events.stdout | default('Nenhum') }}, PRIMAVERA={{ primavera_services.stdout | default('Nenhum') }}, Sessões={{ user_sessions.stdout | default('Nenhuma') }}, Processos={{ user_processes.stdout | default('Nenhum') }}, Conexões={{ network_connections.stdout | default('Nenhuma') }}"
+        line: "{{ inventory_hostname }}: Resumo - Logon malsucedidos={{ logon_failures.stdout | default('Nenhum') }}, Bloqueios={{ lockout_events.stdout | default('Nenhum') }}, Sysmon={{ sysmon_events.stdout | default('Nenhum') }}, PRIMAVERA={{ primavera_services.stdout | default('Nenhum') }}, Sessões={{ user_sessions.stdout | default('Nenhuma') }}, Processos={{ user_processes.stdout | default('Nenhum') }}, Conexões={{ network_connections.stdout | default('Nenhuma') }}"
         create: yes
       delegate_to: localhost

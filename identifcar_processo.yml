@@ -5,8 +5,8 @@
   vars:
     target_user: "erica.santos"
     log_path: "/tmp/wazuh_alert_investigation.log"
-    event_time: "2025-05-15T07:32:24"  # Atualizado para o novo evento
-    time_window_minutes: 30
+    event_time: "2025-05-15T07:32:24"
+    time_window_minutes: 60  # Aumentado para capturar mais eventos
   tasks:
     - name: Verificar conectividade na porta WinRM
       ansible.builtin.wait_for:
@@ -30,7 +30,7 @@
 
     - name: Verificar configuração de auditoria de logon
       win_shell: |
-        auditpol /get /subcategory:"Logon" | Out-String
+        auditpol /get /subcategory:"Início de Sessão" | Out-String
       register: audit_policy
       ignore_errors: yes
       when: winrm_connect.failed is not defined or not winrm_connect.failed
@@ -45,11 +45,11 @@
 
     - name: Habilitar auditoria de logon malsucedido
       win_shell: |
-        auditpol /set /subcategory:"Logon" /failure:enable
+        auditpol /set /subcategory:"Início de Sessão" /failure:enable
       ignore_errors: yes
       when:
         - winrm_connect.failed is not defined or not winrm_connect.failed
-        - audit_policy.stdout is defined and 'Failure' not in audit_policy.stdout
+        - audit_policy.stdout is defined and 'Falha' not in audit_policy.stdout
 
     - name: Coletar eventos de logon malsucedidos (eventID 4625)
       win_shell: |
@@ -62,8 +62,7 @@
             StartTime = $startTime
             EndTime = $endTime
           } -ErrorAction SilentlyContinue | Where-Object {
-            $_.Properties[5].Value -eq "{{ target_user }}" -and
-            $_.Properties[10].Value -eq "INACOM-DAFSG-21"
+            $_.Properties[5].Value -eq "{{ target_user }}"
           }
           if ($events) {
             $events | Select-Object TimeCreated, @{
@@ -80,7 +79,7 @@
               Name='WorkstationName'; Expression={$_.Properties[10].Value}
             } | ConvertTo-Json -Depth 3
           } else {
-            Write-Output '{"events": [], "message": "Nenhum evento 4625 encontrado para {{ target_user }} em INACOM-DAFSG-21"}'
+            Write-Output '{"events": [], "message": "Nenhum evento 4625 encontrado para {{ target_user }}"}'
           }
         } catch {
           Write-Output '{"events": [], "message": "Erro ao coletar eventos: $($_.Exception.Message)"}'
@@ -133,9 +132,7 @@
         }
       register: sysmon_events
       ignore_errors: yes
-      when:
-        - winrm_connect.failed is not defined or not winrm_connect.failed
-        - inventory_hostname == "INACOM-DAFSG-21"
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
 
     - name: Exibir eventos Sysmon
       debug:
@@ -164,9 +161,7 @@
         }
       register: primavera_services
       ignore_errors: yes
-      when:
-        - winrm_connect.failed is not defined or not winrm_connect.failed
-        - inventory_hostname == "INACOM-DAFSG-21"
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
 
     - name: Exibir serviços do PRIMAVERA
       debug:
@@ -203,9 +198,7 @@
         }
       register: user_sessions
       ignore_errors: yes
-      when:
-        - winrm_connect.failed is not defined or not winrm_connect.failed
-        - inventory_hostname == "INACOM-DAFSG-21"
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
 
     - name: Exibir sessões ativas do usuário
       debug:
@@ -236,9 +229,7 @@
         }
       register: user_processes
       ignore_errors: yes
-      when:
-        - winrm_connect.failed is not defined or not winrm_connect.failed
-        - inventory_hostname == "INACOM-DAFSG-21"
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
 
     - name: Exibir processos associados ao usuário
       debug:
@@ -253,9 +244,48 @@
       delegate_to: localhost
       when: user_processes is defined
 
+    - name: Coletar conexões de rede associadas ao usuário
+      win_shell: |
+        try {
+          $processes = Get-Process -IncludeUserName -ErrorAction SilentlyContinue | Where-Object { $_.UserName -match "{{ target_user }}" }
+          if ($processes) {
+            $pids = $processes | Select-Object -ExpandProperty Id
+            $connections = Get-NetTCPConnection | Where-Object { $pids -contains $_.OwningProcess } | Select-Object @{
+              Name='ProcessId'; Expression={$_.OwningProcess}
+            }, @{
+              Name='ProcessName'; Expression={(Get-Process -Id $_.OwningProcess).ProcessName}
+            }, LocalAddress, LocalPort, RemoteAddress, RemotePort, State
+            if ($connections) {
+              $connections | ConvertTo-Json -Depth 3
+            } else {
+              Write-Output '{"connections": [], "message": "Nenhuma conexão de rede ativa para processos de {{ target_user }}"}'
+            }
+          } else {
+            Write-Output '{"connections": [], "message": "Nenhum processo encontrado para {{ target_user }}"}'
+          }
+        } catch {
+          Write-Output '{"connections": [], "message": "Erro ao coletar conexões: $($_.Exception.Message)"}'
+        }
+      register: network_connections
+      ignore_errors: yes
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
+
+    - name: Exibir conexões de rede
+      debug:
+        var: network_connections.stdout
+      when: network_connections.stdout is defined and network_connections.stdout | length > 0
+
+    - name: Registrar conexões de rede no log
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Conexões de rede={{ network_connections.stdout | default('Nenhuma conexão encontrada') }}"
+        create: yes
+      delegate_to: localhost
+      when: network_connections is defined
+
     - name: Resumo da investigação
       ansible.builtin.lineinfile:
         path: "{{ log_path }}"
-        line: "{{ inventory_hostname }}: Resumo - Logon malsucedidos={{ logon_failures.stdout | default('Nenhum') }}, Sysmon={{ sysmon_events.stdout | default('Nenhum') | default('N/A') }}, PRIMAVERA={{ primavera_services.stdout | default('Nenhum') | default('N/A') }}, Sessões={{ user_sessions.stdout | default('Nenhuma') | default('N/A') }}, Processos={{ user_processes.stdout | default('Nenhum') | default('N/A') }}"
+        line: "{{ inventory_hostname }}: Resumo - Logon malsucedidos={{ logon_failures.stdout | default('Nenhum') }}, Sysmon={{ sysmon_events.stdout | default('Nenhum') }}, PRIMAVERA={{ primavera_services.stdout | default('Nenhum') }}, Sessões={{ user_sessions.stdout | default('Nenhuma') }}, Processos={{ user_processes.stdout | default('Nenhum') }}, Conexões={{ network_connections.stdout | default('Nenhuma') }}"
         create: yes
       delegate_to: localhost

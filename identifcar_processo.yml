@@ -1,0 +1,123 @@
+---
+- name: Identificar processo gerando alerta de bloqueio de conta no Wazuh
+  hosts: maquina_especifica
+  gather_facts: no
+  vars:
+    target_user: "erica.santos"
+    log_path: "/tmp/wazuh_alert_investigation.log"
+    event_time: "2025-05-13T12:09:47"  # Horário do evento de bloqueio
+    time_window_minutes: 30  # Janela de tempo para buscar eventos (antes e depois)
+  tasks:
+    - name: Verificar conectividade na porta WinRM
+      ansible.builtin.wait_for:
+        host: "{{ inventory_hostname }}"
+        port: 5985
+        state: started
+        timeout: 60
+        connect_timeout: 60
+      register: winrm_connect
+      ignore_errors: yes
+      ignore_unreachable: yes
+      delegate_to: localhost
+
+    - name: Logar erro de conectividade
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Erro de conectividade - {{ winrm_connect.msg | default('Falha ao conectar') }}"
+        create: yes
+      delegate_to: localhost
+      when: winrm_connect.failed is defined and winrm_connect.failed
+
+    - name: Coletar eventos de logon malsucedidos (eventID 4625)
+      win_shell: |
+        $startTime = (Get-Date "{{ event_time }}").AddMinutes(-{{ time_window_minutes }})
+        $endTime = (Get-Date "{{ event_time }}").AddMinutes({{ time_window_minutes }})
+        Get-WinEvent -FilterHashtable @{
+          LogName = 'Security'
+          ID = 4625
+          StartTime = $startTime
+          EndTime = $endTime
+        } -ErrorAction SilentlyContinue | Where-Object {
+          $_.Properties[5].Value -eq "{{ target_user }}"
+        } | Select-Object TimeCreated, @{
+          Name='AccountName'; Expression={$_.Properties[5].Value}
+        }, @{
+          Name='AccountDomain'; Expression={$_.Properties[6].Value}
+        }, @{
+          Name='FailureReason'; Expression={$_.Properties[19].Value}
+        }, @{
+          Name='SourceIPAddress'; Expression={$_.Properties[18].Value}
+        }, @{
+          Name='ProcessName'; Expression={$_.Properties[14].Value}
+        } | ConvertTo-Json
+      register: logon_failures
+      ignore_errors: yes
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
+
+    - name: Exibir eventos de logon malsucedidos
+      debug:
+        var: logon_failures.stdout_lines
+      when: logon_failures.stdout is defined and logon_failures.stdout | length > 0
+
+    - name: Registrar eventos de logon malsucedidos no log
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Logon malsucedidos={{ logon_failures.stdout | default('Nenhum evento encontrado') }}"
+        create: yes
+      delegate_to: localhost
+      when: logon_failures is defined
+
+    - name: Verificar sessões ativas do usuário
+      win_shell: |
+        qwinsta | Where-Object { $_ -match "{{ target_user }}" } | ForEach-Object {
+          $fields = $_ -split "\s+"
+          [PSCustomObject]@{
+            SessionName = $fields[1]
+            UserName = $fields[2]
+            SessionID = $fields[3]
+            State = $fields[4]
+          }
+        } | ConvertTo-Json
+      register: user_sessions
+      ignore_errors: yes
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
+
+    - name: Exibir sessões ativas do usuário
+      debug:
+        var: user_sessions.stdout_lines
+      when: user_sessions.stdout is defined and user_sessions.stdout | length > 0
+
+    - name: Registrar sessões ativas no log
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Sessões ativas={{ user_sessions.stdout | default('Nenhuma sessão encontrada') }}"
+        create: yes
+      delegate_to: localhost
+      when: user_sessions is defined
+
+    - name: Coletar processos associados ao usuário
+      win_shell: |
+        Get-Process -IncludeUserName | Where-Object { $_.UserName -match "{{ target_user }}" } | Select-Object ProcessName, Id, Path, StartTime | ConvertTo-Json
+      register: user_processes
+      ignore_errors: yes
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
+
+    - name: Exibir processos associados ao usuário
+      debug:
+        var: user_processes.stdout_lines
+      when: user_processes.stdout is defined and user_processes.stdout | length > 0
+
+    - name: Registrar processos no log
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Processos do usuário={{ user_processes.stdout | default('Nenhum processo encontrado') }}"
+        create: yes
+      delegate_to: localhost
+      when: user_processes is defined
+
+    - name: Resumo da investigação
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Resumo - Logon malsucedidos={{ logon_failures.stdout | default('Nenhum') }}, Sessões={{ user_sessions.stdout | default('Nenhuma') }}, Processos={{ user_processes.stdout | default('Nenhum') }}"
+        create: yes
+      delegate_to: localhost

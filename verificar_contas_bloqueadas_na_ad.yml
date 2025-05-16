@@ -1,0 +1,151 @@
+---
+- name: Verificar e gerenciar contas bloqueadas no domínio
+  hosts: domain_controllers
+  gather_facts: no
+  vars:
+    log_path: "/tmp/domain_locked_accounts.log"
+    days_back: 7
+    user_ou: "OU=Utilizadores no Domínio,OU=INACOM,DC=inacom,DC=local"
+    unlock_accounts: false  # Defina como true para desbloquear contas
+  tasks:
+    - name: Verificar conectividade na porta WinRM
+      ansible.builtin.wait_for:
+        host: "{{ inventory_hostname }}"
+        port: 5985
+        state: started
+        timeout: 60
+        connect_timeout: 60
+      register: winrm_connect
+      ignore_errors: yes
+      ignore_unreachable: yes
+      delegate_to: localhost
+
+    - name: Logar erro de conectividade
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Erro de conectividade - {{ winrm_connect.msg | default('Falha ao conectar') }}"
+        create: yes
+      delegate_to: localhost
+      when: winrm_connect.failed is defined and winrm_connect.failed
+
+    - name: Listar contas bloqueadas
+      win_shell: |
+        try {
+          $lockedUsers = Get-ADUser -Filter {LockedOut -eq $true} -SearchBase "{{ user_ou }}" -Properties LockoutTime, SamAccountName |
+            Select-Object Name, SamAccountName, @{
+              Name='LockoutTime'; Expression={
+                if ($_.LockoutTime) { [DateTime]::FromFileTime($_.LockoutTime) } else { "Desconhecido" }
+              }
+            }, DistinguishedName
+          if ($lockedUsers) {
+            $lockedUsers | ConvertTo-Json -Depth 3
+          } else {
+            Write-Output '{"locked_users": [], "message": "Nenhuma conta bloqueada encontrada"}'
+          }
+        } catch {
+          Write-Output '{"locked_users": [], "message": "Erro ao listar contas bloqueadas: $($_.Exception.Message)"}'
+        }
+      register: locked_accounts
+      ignore_errors: yes
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
+
+    - name: Exibir contas bloqueadas
+      debug:
+        var: locked_accounts.stdout
+      when: locked_accounts.stdout is defined and locked_accounts.stdout | length > 0
+
+    - name: Registrar contas bloqueadas
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Contas bloqueadas={{ locked_accounts.stdout | default('Nenhum dado') }}"
+        create: yes
+      delegate_to: localhost
+      when: locked_accounts is defined
+
+    - name: Coletar eventos de bloqueio (eventID 4740)
+      win_shell: |
+        try {
+          $startTime = (Get-Date).AddDays(-{{ days_back }})
+          $endTime = Get-Date
+          $events = Get-WinEvent -FilterHashtable @{
+            LogName = 'Security'
+            ID = 4740
+            StartTime = $startTime
+            EndTime = $endTime
+          } -ErrorAction SilentlyContinue |
+            Select-Object TimeCreated, @{
+              Name='AccountName'; Expression={$_.Properties[0].Value}
+            }, @{
+              Name='CallerComputerName'; Expression={$_.Properties[6].Value}
+            }
+          if ($events) {
+            $events | ConvertTo-Json -Depth 3
+          } else {
+            Write-Output '{"events": [], "message": "Nenhum evento 4740 encontrado"}'
+          }
+        } catch {
+          Write-Output '{"events": [], "message": "Erro ao coletar eventos 4740: $($_.Exception.Message)"}'
+        }
+      register: lockout_events
+      ignore_errors: yes
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
+
+    - name: Exibir eventos de bloqueio
+      debug:
+        var: lockout_events.stdout
+      when: lockout_events.stdout is defined and lockout_events.stdout | length > 0
+
+    - name: Registrar eventos de bloqueio
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Eventos de bloqueio={{ lockout_events.stdout | default('Nenhum dado') }}"
+        create: yes
+      delegate_to: localhost
+      when: lockout_events is defined
+
+    - name: Desbloquear contas (opcional)
+      win_shell: |
+        try {
+          $lockedUsers = Get-ADUser -Filter {LockedOut -eq $true} -SearchBase "{{ user_ou }}" -Properties SamAccountName
+          if ($lockedUsers) {
+            $results = @()
+            foreach ($user in $lockedUsers) {
+              Unlock-ADAccount -Identity $user.SamAccountName
+              $results += [PSCustomObject]@{
+                SamAccountName = $user.SamAccountName
+                Status = "Desbloqueado"
+              }
+            }
+            $results | ConvertTo-Json -Depth 3
+          } else {
+            Write-Output '{"unlocked": [], "message": "Nenhuma conta para desbloquear"}'
+          }
+        } catch {
+          Write-Output '{"unlocked": [], "message": "Erro ao desbloquear contas: $($_.Exception.Message)"}'
+        }
+      register: unlock_results
+      ignore_errors: yes
+      when:
+        - unlock_accounts
+        - winrm_connect.failed is not defined or not winrm_connect.failed
+        - locked_accounts.stdout is defined and '"locked_users": []' not in locked_accounts.stdout
+
+    - name: Exibir resultados do desbloqueio
+      debug:
+        var: unlock_results.stdout
+      when: unlock_results.stdout is defined and unlock_results.stdout | length > 0
+
+    - name: Registrar resultados do desbloqueio
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Resultados do desbloqueio={{ unlock_results.stdout | default('Nenhum desbloqueio realizado') }}"
+        create: yes
+      delegate_to: localhost
+      when: unlock_results is defined
+
+    - name: Resumo da verificação
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Resumo - Contas bloqueadas={{ locked_accounts.stdout | default('Nenhum') }}, Eventos de bloqueio={{ lockout_events.stdout | default('Nenhum') }}, Desbloqueios={{ unlock_results.stdout | default('Nenhum') }}"
+        create: yes
+      delegate_to: localhost

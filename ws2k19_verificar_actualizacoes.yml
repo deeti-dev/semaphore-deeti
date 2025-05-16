@@ -5,7 +5,7 @@
   ignore_unreachable: yes
   vars:
     log_path: /tmp/update_check_report.log
-    reboot_time: "21:00"  # Horário para agendar o reinício (formato HH:mm)
+    reboot_time: "21:00"
   tasks:
     - name: Verificar conectividade na porta WinRM
       ansible.builtin.wait_for:
@@ -40,6 +40,7 @@
     - name: Exibir as atualizações encontradas
       debug:
         var: update_result.updates
+        verbosity: 2
       when: update_result.updates is defined and update_result.updates | length > 0
 
     - name: Instalar atualizações pendentes

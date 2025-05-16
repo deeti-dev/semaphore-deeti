@@ -1,0 +1,106 @@
+---
+- name: Verificar última comunicação de máquinas e contas com o domínio
+  hosts: domain_controller
+  gather_facts: no
+  vars:
+    log_path: "/tmp/domain_last_communication.log"
+    inactive_days: 90
+    user_ou: "OU=Utilizadores no Domínio,OU=INACOM,DC=inacom,DC=local"
+    computer_ou: "OU=INACOM,DC=inacom,DC=local"
+  tasks:
+    - name: Verificar conectividade na porta WinRM
+      ansible.builtin.wait_for:
+        host: "{{ inventory_hostname }}"
+        port: 5985
+        state: started
+        timeout: 60
+        connect_timeout: 60
+      register: winrm_connect
+      ignore_errors: yes
+      ignore_unreachable: yes
+      delegate_to: localhost
+
+    - name: Logar erro de conectividade
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Erro de conectividade - {{ winrm_connect.msg | default('Falha ao conectar') }}"
+        create: yes
+      delegate_to: localhost
+      when: winrm_connect.failed is defined and winrm_connect.failed
+
+    - name: Coletar última comunicação de contas de usuário
+      win_shell: |
+        try {
+          $cutoffDate = (Get-Date).AddDays(-{{ inactive_days }})
+          $users = Get-ADUser -Filter {LastLogonTimestamp -lt $cutoffDate -or LastLogonTimestamp -notlike "*"} -SearchBase "{{ user_ou }}" -Properties LastLogonTimestamp |
+            Select-Object Name, SamAccountName, @{
+              Name='LastLogonTimestamp'; Expression={
+                if ($_.LastLogonTimestamp) { [DateTime]::FromFileTime($_.LastLogonTimestamp) } else { "Nunca logado" }
+              }
+            }, Enabled
+          if ($users) {
+            $users | ConvertTo-Json -Depth 3
+          } else {
+            Write-Output '{"users": [], "message": "Nenhuma conta de usuário inativa encontrada"}'
+          }
+        } catch {
+          Write-Output '{"users": [], "message": "Erro ao coletar contas de usuário: $($_.Exception.Message)"}'
+        }
+      register: user_last_logon
+      ignore_errors: yes
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
+
+    - name: Exibir última comunicação de contas de usuário
+      debug:
+        var: user_last_logon.stdout
+      when: user_last_logon.stdout is defined and user_last_logon.stdout | length > 0
+
+    - name: Registrar última comunicação de contas de usuário
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Última comunicação de usuários={{ user_last_logon.stdout | default('Nenhum dado') }}"
+        create: yes
+      delegate_to: localhost
+      when: user_last_logon is defined
+
+    - name: Coletar última comunicação de contas de computador
+      win_shell: |
+        try {
+          $cutoffDate = (Get-Date).AddDays(-{{ inactive_days }})
+          $computers = Get-ADComputer -Filter {LastLogon -lt $cutoffDate -or LastLogon -notlike "*"} -SearchBase "{{ computer_ou }}" -Properties LastLogon |
+            Select-Object Name, DNSHostName, @{
+              Name='LastLogon'; Expression={
+                if ($_.LastLogon) { [DateTime]::FromFileTime($_.LastLogon) } else { "Nunca logado" }
+              }
+            }, Enabled
+          if ($computers) {
+            $computers | ConvertTo-Json -Depth 3
+          } else {
+            Write-Output '{"computers": [], "message": "Nenhuma conta de computador inativa encontrada"}'
+          }
+        } catch {
+          Write-Output '{"computers": [], "message": "Erro ao coletar contas de computador: $($_.Exception.Message)"}'
+        }
+      register: computer_last_logon
+      ignore_errors: yes
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
+
+    - name: Exibir última comunicação de contas de computador
+      debug:
+        var: computer_last_logon.stdout
+      when: computer_last_logon.stdout is defined and computer_last_logon.stdout | length > 0
+
+    - name: Registrar última comunicação de contas de computador
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Última comunicação de computadores={{ computer_last_logon.stdout | default('Nenhum dado') }}"
+        create: yes
+      delegate_to: localhost
+      when: computer_last_logon is defined
+
+    - name: Resumo da verificação
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Resumo - Usuários inativos={{ user_last_logon.stdout | default('Nenhum') }}, Computadores inativos={{ computer_last_logon.stdout | default('Nenhum') }}"
+        create: yes
+      delegate_to: localhost

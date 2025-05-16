@@ -6,6 +6,7 @@
     log_path: "/tmp/domain_locked_accounts.log"
     days_back: 7
     user_ou: "OU=Utilizadores no Domínio,OU=INACOM,DC=inacom,DC=local"
+    max_accounts: 100
   tasks:
     - name: Verificar conectividade na porta WinRM
       ansible.builtin.wait_for:
@@ -266,11 +267,42 @@
       delegate_to: localhost
       when: test_users.stdout is defined
 
+    - name: Contar contas bloqueadas
+      win_shell: |
+        try {
+          Import-Module ActiveDirectory
+          $lockedUsers = Get-ADUser -Filter {LockedOut -eq $true} -SearchBase "{{ user_ou }}" -Properties SamAccountName -ErrorAction Stop
+          Write-Output '{"count": ' + $lockedUsers.Count + ', "message": "Contagem de contas bloqueadas"}'
+        } catch {
+          Write-Output '{"count": 0, "message": "Erro ao contar contas bloqueadas: $($_.Exception.Message)"}'
+        }
+      register: locked_count
+      ignore_errors: true
+      when:
+        - not winrm_connect.failed | default(false)
+        - not auth_check.unreachable | default(false)
+        - ad_module_check.stdout is defined
+        - ad_module_check.stdout | regex_search('status\": \"available')
+        - ou_check.stdout is defined
+        - ou_check.stdout | regex_search('status\": \"valid')
+        - permission_check.stdout is defined
+        - permission_check.stdout | regex_search('permissions\": \"granted')
+        - lockedout_permission_check.stdout is defined
+        - lockedout_permission_check.stdout | regex_search('lockedout_permission\": \"granted')
+
+    - name: Logar contagem de contas bloqueadas
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Contagem de contas bloqueadas={{ locked_count.stdout | default('Nenhum dado') }}"
+        create: true
+      delegate_to: localhost
+      when: locked_count.stdout is defined
+
     - name: Listar contas bloqueadas
       win_shell: |
         try {
           Import-Module ActiveDirectory
-          $lockedUsers = Get-ADUser -Filter {LockedOut -eq $true} -SearchBase "{{ user_ou }}" -Properties LockoutTime,SamAccountName -ErrorAction Stop |
+          $lockedUsers = Get-ADUser -Filter {LockedOut -eq $true} -SearchBase "{{ user_ou }}" -Properties LockoutTime,SamAccountName -ResultSetSize {{ max_accounts }} -ErrorAction Stop |
             Select-Object Name,SamAccountName,@{Name='LockoutTime';Expression={if ($_.LockoutTime) { [DateTime]::FromFileTime($_.LockoutTime) } else { 'Desconhecido' }}},DistinguishedName
           if ($lockedUsers) {
             Write-Output ($lockedUsers | ConvertTo-Json -Depth 3)
@@ -295,8 +327,9 @@
         - lockedout_permission_check.stdout | regex_search('lockedout_permission\": \"granted')
 
     - name: Exibir contas bloqueadas
-      debug:
+      ansible.builtin.debug:
         msg: "{{ locked_accounts.stdout }}"
+        verbosity: 2
       when: locked_accounts.stdout is defined and locked_accounts.stdout | length > 0
 
     - name: Registrar contas bloqueadas
@@ -354,8 +387,9 @@
         - locked_accounts.stdout | regex_search('locked_users\": \[{')
 
     - name: Exibir eventos de logon malsucedidos
-      debug:
+      ansible.builtin.debug:
         msg: "{{ logon_failures.stdout }}"
+        verbosity: 2
       when: logon_failures.stdout is defined and logon_failures.stdout | length > 0
 
     - name: Registrar eventos de logon malsucedidos

@@ -307,4 +307,9 @@
     - name: Resumo da verificação
       ansible.builtin.lineinfile:
         path: "{{ log_path }}"
-        line: "{{ inventory_hostname }}: Resumo - Contas bloqueadas={{ locked_accounts.stdout | default('N
+        line: "{{ inventory_hostname }}: Resumo - Contas bloqueadas={{ locked_accounts.stdout | default('Nenhum') }}, Logon malsucedidos={{ logon_failures.stdout | default('Nenhum') }}"
+        create: true
+      delegate_to: localhost
+      when:
+        - locked_accounts.stdout is defined
+        - logon_failures.stdout is defined

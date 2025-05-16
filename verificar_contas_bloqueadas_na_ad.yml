@@ -16,21 +16,42 @@
         timeout: 60
         connect_timeout: 60
       register: winrm_connect
-      ignore_errors: yes
-      ignore_unreachable: yes
+      ignore_errors: true
+      ignore_unreachable: true
       delegate_to: localhost
 
     - name: Logar erro de conectividade
       ansible.builtin.lineinfile:
         path: "{{ log_path }}"
         line: "{{ inventory_hostname }}: Erro de conectividade - {{ winrm_connect.msg | default('Falha ao conectar') }}"
-        create: yes
+        create: true
       delegate_to: localhost
       when: winrm_connect.failed is defined and winrm_connect.failed
+
+    - name: Verificar disponibilidade do módulo ActiveDirectory
+      win_shell: |
+        try {
+          Import-Module ActiveDirectory -ErrorAction Stop
+          Write-Output '{"module": "ActiveDirectory", "status": "available"}'
+        } catch {
+          Write-Output '{"module": "ActiveDirectory", "status": "unavailable", "message": "Erro ao carregar módulo: $($_.Exception.Message)"}'
+        }
+      register: ad_module_check
+      ignore_errors: true
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
+
+    - name: Logar status do módulo ActiveDirectory
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Status do módulo ActiveDirectory={{ ad_module_check.stdout | default('Nenhum dado') }}"
+        create: true
+      delegate_to: localhost
+      when: ad_module_check.stdout is defined
 
     - name: Listar contas bloqueadas
       win_shell: |
         try {
+          Import-Module ActiveDirectory
           $lockedUsers = Get-ADUser -Filter {LockedOut -eq $true} -SearchBase "{{ user_ou }}" -Properties LockoutTime, SamAccountName |
             Select-Object Name, SamAccountName, @{
               Name='LockoutTime'; Expression={
@@ -46,8 +67,10 @@
           Write-Output '{"locked_users": [], "message": "Erro ao listar contas bloqueadas: $($_.Exception.Message)"}'
         }
       register: locked_accounts
-      ignore_errors: yes
-      when: winrm_connect.failed is not defined or not winrm_connect.failed
+      ignore_errors: true
+      when:
+        - winrm_connect.failed is not defined or not winrm_connect.failed
+        - ad_module_check.stdout is defined and '"status": "available"' in ad_module_check.stdout
 
     - name: Exibir contas bloqueadas
       debug:
@@ -58,9 +81,9 @@
       ansible.builtin.lineinfile:
         path: "{{ log_path }}"
         line: "{{ inventory_hostname }}: Contas bloqueadas={{ locked_accounts.stdout | default('Nenhum dado') }}"
-        create: yes
+        create: true
       delegate_to: localhost
-      when: locked_accounts is defined
+      when: locked_accounts.stdout is defined
 
     - name: Coletar eventos de bloqueio (eventID 4740)
       win_shell: |
@@ -87,7 +110,7 @@
           Write-Output '{"events": [], "message": "Erro ao coletar eventos 4740: $($_.Exception.Message)"}'
         }
       register: lockout_events
-      ignore_errors: yes
+      ignore_errors: true
       when: winrm_connect.failed is not defined or not winrm_connect.failed
 
     - name: Exibir eventos de bloqueio
@@ -99,13 +122,14 @@
       ansible.builtin.lineinfile:
         path: "{{ log_path }}"
         line: "{{ inventory_hostname }}: Eventos de bloqueio={{ lockout_events.stdout | default('Nenhum dado') }}"
-        create: yes
+        create: true
       delegate_to: localhost
-      when: lockout_events is defined
+      when: lockout_events.stdout is defined
 
     - name: Desbloquear contas (opcional)
       win_shell: |
         try {
+          Import-Module ActiveDirectory
           $lockedUsers = Get-ADUser -Filter {LockedOut -eq $true} -SearchBase "{{ user_ou }}" -Properties SamAccountName
           if ($lockedUsers) {
             $results = @()
@@ -124,11 +148,12 @@
           Write-Output '{"unlocked": [], "message": "Erro ao desbloquear contas: $($_.Exception.Message)"}'
         }
       register: unlock_results
-      ignore_errors: yes
+      ignore_errors: true
       when:
         - unlock_accounts
         - winrm_connect.failed is not defined or not winrm_connect.failed
-        - locked_accounts.stdout is defined and '"locked_users": []' not in locked_accounts.stdout
+        - ad_module_check.stdout is defined and '"status": "available"' in ad_module_check.stdout
+        - locked_accounts.stdout is defined and locked_accounts.stdout != '{"locked_users": [], "message": "Nenhuma conta bloqueada encontrada"}'
 
     - name: Exibir resultados do desbloqueio
       debug:
@@ -139,13 +164,13 @@
       ansible.builtin.lineinfile:
         path: "{{ log_path }}"
         line: "{{ inventory_hostname }}: Resultados do desbloqueio={{ unlock_results.stdout | default('Nenhum desbloqueio realizado') }}"
-        create: yes
+        create: true
       delegate_to: localhost
-      when: unlock_results is defined
+      when: unlock_results.stdout is defined
 
     - name: Resumo da verificação
       ansible.builtin.lineinfile:
         path: "{{ log_path }}"
         line: "{{ inventory_hostname }}: Resumo - Contas bloqueadas={{ locked_accounts.stdout | default('Nenhum') }}, Eventos de bloqueio={{ lockout_events.stdout | default('Nenhum') }}, Desbloqueios={{ unlock_results.stdout | default('Nenhum') }}"
-        create: yes
+        create: true
       delegate_to: localhost

@@ -1,12 +1,11 @@
 ---
-- name: Verificar e gerenciar contas bloqueadas no domínio
+- name: Listar todas as contas bloqueadas no domínio
   hosts: domain_controllers
   gather_facts: no
   vars:
     log_path: "/tmp/domain_locked_accounts.log"
     days_back: 7
     user_ou: "OU=Utilizadores no Domínio,OU=INACOM,DC=inacom,DC=local"
-    unlock_accounts: false  # Defina como true para desbloquear contas
   tasks:
     - name: Verificar conectividade na porta WinRM
       ansible.builtin.wait_for:
@@ -86,94 +85,66 @@
       delegate_to: localhost
       when: locked_accounts.stdout is defined
 
-    - name: Coletar eventos de bloqueio (eventID 4740)
+    - name: Coletar eventos de logon malsucedidos (eventID 4625) para contas bloqueadas
       win_shell: |
         try {
-          $startTime = (Get-Date).AddDays(-{{ days_back }})
-          $endTime = Get-Date
-          $events = Get-WinEvent -FilterHashtable @{
-            LogName = 'Security'
-            ID = 4740
-            StartTime = $startTime
-            EndTime = $endTime
-          } -ErrorAction SilentlyContinue |
-            Select-Object TimeCreated, @{
-              Name='AccountName'; Expression={$_.Properties[0].Value}
-            }, @{
-              Name='CallerComputerName'; Expression={$_.Properties[6].Value}
-            }
-          if ($events) {
-            $events | ConvertTo-Json -Depth 3
-          } else {
-            Write-Output '{"events": [], "message": "Nenhum evento 4740 encontrado"}'
-          }
-        } catch {
-          Write-Output '{"events": [], "message": "Erro ao coletar eventos 4740: $($_.Exception.Message)"}'
-        }
-      register: lockout_events
-      ignore_errors: true
-      when: not winrm_connect.failed | default(false)
-
-    - name: Exibir eventos de bloqueio
-      debug:
-        msg: "{{ lockout_events.stdout }}"
-      when: lockout_events.stdout is defined and lockout_events.stdout | length > 0
-
-    - name: Registrar eventos de bloqueio
-      ansible.builtin.lineinfile:
-        path: "{{ log_path }}"
-        line: "{{ inventory_hostname }}: Eventos de bloqueio={{ lockout_events.stdout | default('Nenhum dado') }}"
-        create: true
-      delegate_to: localhost
-      when: lockout_events.stdout is defined
-
-    - name: Desbloquear contas (opcional)
-      win_shell: |
-        try {
-          Import-Module ActiveDirectory
-          $lockedUsers = Get-ADUser -Filter {LockedOut -eq $true} -SearchBase "{{ user_ou }}" -Properties SamAccountName
+          $lockedUsers = {{ locked_accounts.stdout | from_json | default({'locked_users': []}) }}['locked_users']
           if ($lockedUsers) {
-            $results = @()
-            foreach ($user in $lockedUsers) {
-              Unlock-ADAccount -Identity $user.SamAccountName
-              $results += [PSCustomObject]@{
-                SamAccountName = $user.SamAccountName
-                Status = "Desbloqueado"
-              }
+            $userNames = $lockedUsers | ForEach-Object { $_.SamAccountName }
+            $startTime = (Get-Date).AddDays(-{{ days_back }})
+            $endTime = Get-Date
+            $events = Get-WinEvent -FilterHashtable @{
+              LogName = 'Security'
+              ID = 4625
+              StartTime = $startTime
+              EndTime = $endTime
+            } -ErrorAction SilentlyContinue | Where-Object {
+              $_.Properties[5].Value -in $userNames
             }
-            $results | ConvertTo-Json -Depth 3
+            if ($events) {
+              $events | Select-Object TimeCreated, @{
+                Name='AccountName'; Expression={$_.Properties[5].Value}
+              }, @{
+                Name='FailureReason'; Expression={$_.Properties[19].Value}
+              }, @{
+                Name='SourceIPAddress'; Expression={$_.Properties[18].Value}
+              }, @{
+                Name='ProcessName'; Expression={$_.Properties[14].Value}
+              }, @{
+                Name='WorkstationName'; Expression={$_.Properties[10].Value}
+              } | ConvertTo-Json -Depth 3
+            } else {
+              Write-Output '{"events": [], "message": "Nenhum evento 4625 encontrado para contas bloqueadas"}'
+            }
           } else {
-            Write-Output '{"unlocked": [], "message": "Nenhuma conta para desbloquear"}'
+            Write-Output '{"events": [], "message": "Nenhuma conta bloqueada para verificar eventos"}'
           }
         } catch {
-          Write-Output '{"unlocked": [], "message": "Erro ao desbloquear contas: $($_.Exception.Message)"}'
+          Write-Output '{"events": [], "message": "Erro ao coletar eventos: $($_.Exception.Message)"}'
         }
-      register: unlock_results
+      register: logon_failures
       ignore_errors: true
       when:
-        - unlock_accounts
         - not winrm_connect.failed | default(false)
-        - ad_module_check.stdout is defined
-        - ad_module_check.stdout | regex_search('status\": \"available')
         - locked_accounts.stdout is defined
         - locked_accounts.stdout | regex_search('locked_users\": \[{')
 
-    - name: Exibir resultados do desbloqueio
+    - name: Exibir eventos de logon malsucedidos
       debug:
-        msg: "{{ unlock_results.stdout }}"
-      when: unlock_results.stdout is defined and unlock_results.stdout | length > 0
+        msg: "{{ logon_failures.stdout }}"
+      when: logon_failures.stdout is defined and logon_failures.stdout | length > 0
 
-    - name: Registrar resultados do desbloqueio
+    - name: Registrar eventos de logon malsucedidos
       ansible.builtin.lineinfile:
         path: "{{ log_path }}"
-        line: "{{ inventory_hostname }}: Resultados do desbloqueio={{ unlock_results.stdout | default('Nenhum desbloqueio realizado') }}"
+        line: "{{ inventory_hostname }}: Logon malsucedidos={{ logon_failures.stdout | default('Nenhum evento') }}"
         create: true
       delegate_to: localhost
-      when: unlock_results.stdout is defined
+      when: logon_failures.stdout is defined
 
     - name: Resumo da verificação
       ansible.builtin.lineinfile:
         path: "{{ log_path }}"
-        line: "{{ inventory_hostname }}: Resumo - Contas bloqueadas={{ locked_accounts.stdout | default('Nenhum') }}, Eventos de bloqueio={{ lockout_events.stdout | default('Nenhum') }}, Desbloqueios={{ unlock_results.stdout | default('Nenhum') }}"
+        line: "{{ inventory_hostname }}: Resumo - Contas bloqueadas={{ locked_accounts.stdout | default('Nenhum') }}, Logon malsucedidos={{ logon_failures.stdout | default('Nenhum') }}"
         create: true
       delegate_to: localhost

@@ -1,6 +1,6 @@
 ---
 - name: Verificar última comunicação de máquinas e contas com o domínio
-  hosts: domain_controller
+  hosts: domain_controllers
   gather_facts: no
   vars:
     log_path: "/tmp/domain_last_communication.log"

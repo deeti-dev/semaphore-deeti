@@ -27,13 +27,34 @@
       delegate_to: localhost
       when: winrm_connect.failed | default(false)
 
+    - name: Coletar informações de depuração
+      win_shell: |
+        try {
+          $psVersion = $PSVersionTable.PSVersion | ConvertTo-Json
+          $dcInfo = Get-ADDomainController | Select-Object Name, OperatingSystem, Site | ConvertTo-Json
+          Write-Output '{"debug": {"powershell_version": ' + $psVersion + ', "dc_info": ' + $dcInfo + '}}'
+        } catch {
+          Write-Output '{"debug": {"powershell_version": "unknown", "dc_info": "unknown", "message": "Erro ao coletar informações de depuração: $($_.ToString())"}}'
+        }
+      register: debug_info
+      ignore_errors: true
+      when: not winrm_connect.failed | default(false)
+
+    - name: Logar informações de depuração
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Debug={{ debug_info.stdout | default('Nenhum dado') }}"
+        create: true
+      delegate_to: localhost
+      when: debug_info.stdout is defined
+
     - name: Verificar disponibilidade do módulo ActiveDirectory
       win_shell: |
         try {
           Import-Module ActiveDirectory -ErrorAction Stop
           Write-Output '{"module": "ActiveDirectory", "status": "available"}'
         } catch {
-          Write-Output '{"module": "ActiveDirectory", "status": "unavailable", "message": "Erro ao carregar módulo: $($_.Exception | Out-String)"}'
+          Write-Output '{"module": "ActiveDirectory", "status": "unavailable", "message": "Erro ao carregar módulo: $($_.ToString())"}'
         }
       register: ad_module_check
       ignore_errors: true
@@ -54,7 +75,7 @@
           $ou = Get-ADOrganizationalUnit -Filter "DistinguishedName -eq '{{ user_ou }}'" -ErrorAction Stop
           Write-Output '{"ou": "{{ user_ou }}", "status": "valid"}'
         } catch {
-          Write-Output '{"ou": "{{ user_ou }}", "status": "invalid", "message": "Erro ao validar OU: $($_.Exception | Out-String)"}'
+          Write-Output '{"ou": "{{ user_ou }}", "status": "invalid", "message": "Erro ao validar OU: $($_.ToString())"}'
         }
       register: ou_check
       ignore_errors: true
@@ -84,7 +105,7 @@
             Write-Output '{"permissions": "denied", "user": "{{ ansible_user }}", "ou": "{{ user_ou }}", "message": "Usuário não tem permissão ReadProperty"}'
           }
         } catch {
-          Write-Output '{"permissions": "error", "user": "{{ ansible_user }}", "ou": "{{ user_ou }}", "message": "Erro ao verificar permissões: $($_.Exception | Out-String)"}'
+          Write-Output '{"permissions": "error", "user": "{{ ansible_user }}", "ou": "{{ user_ou }}", "message": "Erro ao verificar permissões: $($_.ToString())"}'
         }
       register: permission_check
       ignore_errors: true
@@ -121,7 +142,7 @@
             Write-Output '{"lockedout_permission": "denied", "user": "{{ ansible_user }}", "ou": "{{ user_ou }}", "message": "Usuário não tem permissão para atributo LockedOut"}'
           }
         } catch {
-          Write-Output '{"lockedout_permission": "error", "user": "{{ ansible_user }}", "ou": "{{ user_ou }}", "message": "Erro ao verificar permissão LockedOut: $($_.Exception | Out-String)"}'
+          Write-Output '{"lockedout_permission": "error", "user": "{{ ansible_user }}", "ou": "{{ user_ou }}", "message": "Erro ao verificar permissão LockedOut: $($_.ToString())"}'
         }
       register: lockedout_permission_check
       ignore_errors: true
@@ -154,7 +175,7 @@
             Write-Output '{"users": [], "message": "Nenhuma conta encontrada na OU"}'
           }
         } catch {
-          Write-Output '{"users": [], "message": "Erro ao listar contas na OU: $($_.Exception | Out-String)"}'
+          Write-Output '{"users": [], "message": "Erro ao listar contas na OU: $($_.ToString())"}'
         }
       register: test_users
       ignore_errors: true
@@ -187,7 +208,17 @@
             Write-Output '{"locked_users": [], "message": "Nenhuma conta bloqueada encontrada"}'
           }
         } catch {
-          Write-Output '{"locked_users": [], "message": "Erro ao listar contas bloqueadas: $($_.Exception | Out-String)"}'
+          try {
+            $lockedUsers = Get-ADUser -Filter "LockedOut -eq 'True'" -SearchBase "{{ user_ou }}" -Properties LockoutTime,SamAccountName -ErrorAction Stop |
+              Select-Object Name,SamAccountName,@{Name='LockoutTime';Expression={if ($_.LockoutTime) { [DateTime]::FromFileTime($_.LockoutTime) } else { 'Desconhecido' }}},DistinguishedName
+            if ($lockedUsers) {
+              $lockedUsers | ConvertTo-Json -Depth 3
+            } else {
+              Write-Output '{"locked_users": [], "message": "Nenhuma conta bloqueada encontrada (filtro alternativo)"}'
+            }
+          } catch {
+            Write-Output '{"locked_users": [], "message": "Erro ao listar contas bloqueadas: $($_.ToString())"}'
+          }
         }
       register: locked_accounts
       ignore_errors: true
@@ -251,7 +282,7 @@
             Write-Output '{"events": [], "message": "Nenhuma conta bloqueada para verificar eventos"}'
           }
         } catch {
-          Write-Output '{"events": [], "message": "Erro ao coletar eventos: $($_.Exception | Out-String)"}'
+          Write-Output '{"events": [], "message": "Erro ao coletar eventos: $($_.ToString())"}'
         }
       register: logon_failures
       ignore_errors: true
@@ -276,6 +307,4 @@
     - name: Resumo da verificação
       ansible.builtin.lineinfile:
         path: "{{ log_path }}"
-        line: "{{ inventory_hostname }}: Resumo - Contas bloqueadas={{ locked_accounts.stdout | default('Nenhum') }}, Logon malsucedidos={{ logon_failures.stdout | default('Nenhum') }}"
-        create: true
-      delegate_to: localhost
+        line: "{{ inventory_hostname }}: Resumo - Contas bloqueadas={{ locked_accounts.stdout | default('N

@@ -33,7 +33,7 @@
           Import-Module ActiveDirectory -ErrorAction Stop
           Write-Output '{"module": "ActiveDirectory", "status": "available"}'
         } catch {
-          Write-Output '{"module": "ActiveDirectory", "status": "unavailable", "message": "Erro ao carregar módulo: $($_.Exception.Message)"}'
+          Write-Output '{"module": "ActiveDirectory", "status": "unavailable", "message": "Erro ao carregar módulo: $($_ | Out-String)"}'
         }
       register: ad_module_check
       ignore_errors: true
@@ -54,7 +54,7 @@
           $ou = Get-ADOrganizationalUnit -Filter "DistinguishedName -eq '{{ user_ou }}'" -ErrorAction Stop
           Write-Output '{"ou": "{{ user_ou }}", "status": "valid"}'
         } catch {
-          Write-Output '{"ou": "{{ user_ou }}", "status": "invalid", "message": "Erro ao validar OU: $($_.Exception.Message)"}'
+          Write-Output '{"ou": "{{ user_ou }}", "status": "invalid", "message": "Erro ao validar OU: $($_ | Out-String)"}'
         }
       register: ou_check
       ignore_errors: true
@@ -71,23 +71,51 @@
       delegate_to: localhost
       when: ou_check.stdout is defined
 
+    - name: Verificar permissões na OU
+      win_shell: |
+        try {
+          Import-Module ActiveDirectory
+          $acl = Get-Acl -Path "AD:{{ user_ou }}"
+          $user = "{{ ansible_user }}"
+          $access = $acl.Access | Where-Object { $_.IdentityReference -eq $user -and $_.ActiveDirectoryRights -match "ReadProperty" }
+          if ($access) {
+            Write-Output '{"permissions": "granted", "user": "{{ ansible_user }}", "ou": "{{ user_ou }}"}'
+          } else {
+            Write-Output '{"permissions": "denied", "user": "{{ ansible_user }}", "ou": "{{ user_ou }}", "message": "Usuário não tem permissão ReadProperty"}'
+          }
+        } catch {
+          Write-Output '{"permissions": "error", "user": "{{ ansible_user }}", "ou": "{{ user_ou }}", "message": "Erro ao verificar permissões: $($_ | Out-String)"}'
+        }
+      register: permission_check
+      ignore_errors: true
+      when:
+        - not winrm_connect.failed | default(false)
+        - ad_module_check.stdout is defined
+        - ad_module_check.stdout | regex_search('status\": \"available')
+        - ou_check.stdout is defined
+        - ou_check.stdout | regex_search('status\": \"valid')
+
+    - name: Logar status das permissões
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Status das permissões={{ permission_check.stdout | default('Nenhum dado') }}"
+        create: true
+      delegate_to: localhost
+      when: permission_check.stdout is defined
+
     - name: Listar contas bloqueadas
       win_shell: |
         try {
           Import-Module ActiveDirectory
-          $lockedUsers = Get-ADUser -Filter {LockedOut -eq $true} -SearchBase "{{ user_ou }}" -Properties LockoutTime, SamAccountName -ErrorAction Stop |
-            Select-Object Name, SamAccountName, @{
-              Name='LockoutTime'; Expression={
-                if ($_.LockoutTime) { [DateTime]::FromFileTime($_.LockoutTime) } else { "Desconhecido" }
-              }
-            }, DistinguishedName
+          $lockedUsers = Get-ADUser -Filter "LockedOut -eq '$true'" -SearchBase "{{ user_ou }}" -Properties LockoutTime,SamAccountName -ErrorAction Stop |
+            Select-Object Name,SamAccountName,@{Name='LockoutTime';Expression={if ($_.LockoutTime) { [DateTime]::FromFileTime($_.LockoutTime) } else { 'Desconhecido' }}},DistinguishedName
           if ($lockedUsers) {
             $lockedUsers | ConvertTo-Json -Depth 3
           } else {
             Write-Output '{"locked_users": [], "message": "Nenhuma conta bloqueada encontrada"}'
           }
         } catch {
-          Write-Output '{"locked_users": [], "message": "Erro ao listar contas bloqueadas: $($_.Exception.Message)"}'
+          Write-Output '{"locked_users": [], "message": "Erro ao listar contas bloqueadas: $($_ | Out-String)"}'
         }
       register: locked_accounts
       ignore_errors: true
@@ -97,6 +125,8 @@
         - ad_module_check.stdout | regex_search('status\": \"available')
         - ou_check.stdout is defined
         - ou_check.stdout | regex_search('status\": \"valid')
+        - permission_check.stdout is defined
+        - permission_check.stdout | regex_search('permissions\": \"granted')
 
     - name: Exibir contas bloqueadas
       debug:
@@ -147,7 +177,7 @@
             Write-Output '{"events": [], "message": "Nenhuma conta bloqueada para verificar eventos"}'
           }
         } catch {
-          Write-Output '{"events": [], "message": "Erro ao coletar eventos: $($_.Exception.Message)"}'
+          Write-Output '{"events": [], "message": "Erro ao coletar eventos: $($_ | Out-String)"}'
         }
       register: logon_failures
       ignore_errors: true

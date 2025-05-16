@@ -27,6 +27,22 @@
       delegate_to: localhost
       when: winrm_connect.failed | default(false)
 
+    - name: Verificar autenticação WinRM
+      win_shell: |
+        whoami
+      register: auth_check
+      ignore_errors: true
+      ignore_unreachable: true
+      when: not winrm_connect.failed | default(false)
+
+    - name: Logar erro de autenticação
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Erro de autenticação - {{ auth_check.msg | default('Credenciais rejeitadas') }}"
+        create: true
+      delegate_to: localhost
+      when: auth_check.unreachable | default(false)
+
     - name: Coletar informações de depuração
       win_shell: |
         try {
@@ -38,7 +54,9 @@
         }
       register: debug_info
       ignore_errors: true
-      when: not winrm_connect.failed | default(false)
+      when:
+        - not winrm_connect.failed | default(false)
+        - not auth_check.unreachable | default(false)
 
     - name: Logar informações de depuração
       ansible.builtin.lineinfile:
@@ -58,7 +76,9 @@
         }
       register: ad_module_check
       ignore_errors: true
-      when: not winrm_connect.failed | default(false)
+      when:
+        - not winrm_connect.failed | default(false)
+        - not auth_check.unreachable | default(false)
 
     - name: Logar status do módulo ActiveDirectory
       ansible.builtin.lineinfile:
@@ -81,6 +101,7 @@
       ignore_errors: true
       when:
         - not winrm_connect.failed | default(false)
+        - not auth_check.unreachable | default(false)
         - ad_module_check.stdout is defined
         - ad_module_check.stdout | regex_search('status\": \"available')
 
@@ -111,6 +132,7 @@
       ignore_errors: true
       when:
         - not winrm_connect.failed | default(false)
+        - not auth_check.unreachable | default(false)
         - ad_module_check.stdout is defined
         - ad_module_check.stdout | regex_search('status\": \"available')
         - ou_check.stdout is defined
@@ -148,6 +170,7 @@
       ignore_errors: true
       when:
         - not winrm_connect.failed | default(false)
+        - not auth_check.unreachable | default(false)
         - ad_module_check.stdout is defined
         - ad_module_check.stdout | regex_search('status\": \"available')
         - ou_check.stdout is defined
@@ -181,6 +204,7 @@
       ignore_errors: true
       when:
         - not winrm_connect.failed | default(false)
+        - not auth_check.unreachable | default(false)
         - ad_module_check.stdout is defined
         - ad_module_check.stdout | regex_search('status\": \"available')
         - ou_check.stdout is defined
@@ -224,6 +248,7 @@
       ignore_errors: true
       when:
         - not winrm_connect.failed | default(false)
+        - not auth_check.unreachable | default(false)
         - ad_module_check.stdout is defined
         - ad_module_check.stdout | regex_search('status\": \"available')
         - ou_check.stdout is defined
@@ -288,6 +313,7 @@
       ignore_errors: true
       when:
         - not winrm_connect.failed | default(false)
+        - not auth_check.unreachable | default(false)
         - locked_accounts.stdout is defined
         - locked_accounts.stdout | regex_search('locked_users\": \[{')
 

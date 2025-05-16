@@ -66,6 +66,29 @@
       delegate_to: localhost
       when: ansible_account_check.stdout is defined
 
+    - name: Verificar política de bloqueio de contas
+      win_shell: |
+        try {
+          Import-Module ActiveDirectory
+          $policy = Get-ADDefaultDomainPasswordPolicy -ErrorAction Stop
+          Write-Output ($policy | Select-Object LockoutThreshold,LockoutDuration,LockoutObservationWindow | ConvertTo-Json)
+        } catch {
+          Write-Output '{"LockoutThreshold": "unknown", "LockoutDuration": "unknown", "LockoutObservationWindow": "unknown", "message": "Erro ao verificar política: $($_.Exception.Message)"}'
+        }
+      register: lockout_policy
+      ignore_errors: true
+      when:
+        - not winrm_connect.failed | default(false)
+        - not auth_check.unreachable | default(false)
+
+    - name: Logar política de bloqueio
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Política de bloqueio={{ lockout_policy.stdout | default('Nenhum dado') }}"
+        create: true
+      delegate_to: localhost
+      when: lockout_policy.stdout is defined
+
     - name: Coletar informações de depuração
       win_shell: |
         try {

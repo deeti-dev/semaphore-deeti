@@ -26,7 +26,7 @@
         line: "{{ inventory_hostname }}: Erro de conectividade - {{ winrm_connect.msg | default('Falha ao conectar') }}"
         create: true
       delegate_to: localhost
-      when: winrm_connect.failed is defined and winrm_connect.failed
+      when: winrm_connect.failed | default(false)
 
     - name: Verificar disponibilidade do módulo ActiveDirectory
       win_shell: |
@@ -38,7 +38,7 @@
         }
       register: ad_module_check
       ignore_errors: true
-      when: winrm_connect.failed is not defined or not winrm_connect.failed
+      when: not winrm_connect.failed | default(false)
 
     - name: Logar status do módulo ActiveDirectory
       ansible.builtin.lineinfile:
@@ -69,12 +69,13 @@
       register: locked_accounts
       ignore_errors: true
       when:
-        - winrm_connect.failed is not defined or not winrm_connect.failed
-        - ad_module_check.stdout is defined and '"status": "available"' in ad_module_check.stdout
+        - not winrm_connect.failed | default(false)
+        - ad_module_check.stdout is defined
+        - ad_module_check.stdout | regex_search('status\": \"available')
 
     - name: Exibir contas bloqueadas
       debug:
-        var: locked_accounts.stdout
+        msg: "{{ locked_accounts.stdout }}"
       when: locked_accounts.stdout is defined and locked_accounts.stdout | length > 0
 
     - name: Registrar contas bloqueadas
@@ -111,11 +112,11 @@
         }
       register: lockout_events
       ignore_errors: true
-      when: winrm_connect.failed is not defined or not winrm_connect.failed
+      when: not winrm_connect.failed | default(false)
 
     - name: Exibir eventos de bloqueio
       debug:
-        var: lockout_events.stdout
+        msg: "{{ lockout_events.stdout }}"
       when: lockout_events.stdout is defined and lockout_events.stdout | length > 0
 
     - name: Registrar eventos de bloqueio
@@ -151,13 +152,15 @@
       ignore_errors: true
       when:
         - unlock_accounts
-        - winrm_connect.failed is not defined or not winrm_connect.failed
-        - ad_module_check.stdout is defined and '"status": "available"' in ad_module_check.stdout
-        - locked_accounts.stdout is defined and locked_accounts.stdout != '{"locked_users": [], "message": "Nenhuma conta bloqueada encontrada"}'
+        - not winrm_connect.failed | default(false)
+        - ad_module_check.stdout is defined
+        - ad_module_check.stdout | regex_search('status\": \"available')
+        - locked_accounts.stdout is defined
+        - locked_accounts.stdout | regex_search('locked_users\": \[{')
 
     - name: Exibir resultados do desbloqueio
       debug:
-        var: unlock_results.stdout
+        msg: "{{ unlock_results.stdout }}"
       when: unlock_results.stdout is defined and unlock_results.stdout | length > 0
 
     - name: Registrar resultados do desbloqueio

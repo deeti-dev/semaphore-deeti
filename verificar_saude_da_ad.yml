@@ -1,0 +1,174 @@
+---
+- name: Verificar saúde dos controladores de domínio
+  hosts: domain_controllers
+  gather_facts: no
+  vars:
+    log_path: "/tmp/domain_controller_health.log"
+    critical_services:
+      - "ADWS"
+      - "DNS"
+      - "KDC"
+      - "Netlogon"
+      - "w32time"
+    disk_threshold: 20  # Percentual de espaço livre mínimo
+    days_back: 7
+  tasks:
+    - name: Verificar conectividade na porta WinRM
+      ansible.builtin.wait_for:
+        host: "{{ inventory_hostname }}"
+        port: 5985
+        state: started
+        timeout: 60
+        connect_timeout: 60
+      register: winrm_connect
+      ignore_errors: yes
+      ignore_unreachable: yes
+      delegate_to: localhost
+
+    - name: Logar erro de conectividade
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Erro de conectividade - {{ winrm_connect.msg | default('Falha ao conectar') }}"
+        create: yes
+      delegate_to: localhost
+      when: winrm_connect.failed is defined and winrm_connect.failed
+
+    - name: Verificar status da replicação
+      win_shell: |
+        try {
+          $replSummary = repadmin /replsummary | Out-String
+          if ($replSummary -match "failed") {
+            Write-Output '{"replication": {"status": "failed", "details": "' + $replSummary + '"}}'
+          } else {
+            Write-Output '{"replication": {"status": "success", "details": "' + $replSummary + '"}}'
+          }
+        } catch {
+          Write-Output '{"replication": {"status": "error", "message": "Erro ao verificar replicação: $($_.Exception.Message)"}}'
+        }
+      register: replication_status
+      ignore_errors: yes
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
+
+    - name: Exibir status da replicação
+      debug:
+        var: replication_status.stdout
+      when: replication_status.stdout is defined and replication_status.stdout | length > 0
+
+    - name: Registrar status da replicação
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Status da replicação={{ replication_status.stdout | default('Nenhum dado') }}"
+        create: yes
+      delegate_to: localhost
+      when: replication_status is defined
+
+    - name: Verificar serviços críticos
+      win_shell: |
+        try {
+          $services = Get-Service -Name {{ critical_services | join(',') }} -ErrorAction SilentlyContinue |
+            Select-Object Name, Status, StartType
+          if ($services) {
+            $services | ConvertTo-Json -Depth 3
+          } else {
+            Write-Output '{"services": [], "message": "Nenhum serviço crítico encontrado"}'
+          }
+        } catch {
+          Write-Output '{"services": [], "message": "Erro ao verificar serviços: $($_.Exception.Message)"}'
+        }
+      register: critical_services_status
+      ignore_errors: yes
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
+
+    - name: Exibir serviços críticos
+      debug:
+        var: critical_services_status.stdout
+      when: critical_services_status.stdout is defined and critical_services_status.stdout | length > 0
+
+    - name: Registrar serviços críticos
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Serviços críticos={{ critical_services_status.stdout | default('Nenhum dado') }}"
+        create: yes
+      delegate_to: localhost
+      when: critical_services_status is defined
+
+    - name: Verificar espaço em disco
+      win_shell: |
+        try {
+          $disks = Get-WmiObject Win32_LogicalDisk -Filter "DriveType=3" |
+            Select-Object DeviceID, @{
+              Name='FreeSpacePercent'; Expression={[math]::Round(($_.FreeSpace / $_.Size) * 100, 2)}
+            }, @{
+              Name='FreeSpaceGB'; Expression={[math]::Round($_.FreeSpace / 1GB, 2)}
+            }, @{
+              Name='TotalSpaceGB'; Expression={[math]::Round($_.Size / 1GB, 2)}
+            }
+          $lowDisks = $disks | Where-Object { $_.FreeSpacePercent -lt {{ disk_threshold }} }
+          if ($lowDisks) {
+            $lowDisks | ConvertTo-Json -Depth 3
+          } else {
+            Write-Output '{"disks": [], "message": "Espaço em disco suficiente em todas as partições"}'
+          }
+        } catch {
+          Write-Output '{"disks": [], "message": "Erro ao verificar espaço em disco: $($_.Exception.Message)"}'
+        }
+      register: disk_space
+      ignore_errors: yes
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
+
+    - name: Exibir espaço em disco
+      debug:
+        var: disk_space.stdout
+      when: disk_space.stdout is defined and disk_space.stdout | length > 0
+
+    - name: Registrar espaço em disco
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Espaço em disco={{ disk_space.stdout | default('Nenhum dado') }}"
+        create: yes
+      delegate_to: localhost
+      when: disk_space is defined
+
+    - name: Coletar eventos críticos do Active Directory
+      win_shell: |
+        try {
+          $startTime = (Get-Date).AddDays(-{{ days_back }})
+          $endTime = Get-Date
+          $events = Get-WinEvent -FilterHashtable @{
+            LogName = 'Directory Service'
+            ID = 1202,2887
+            StartTime = $startTime
+            EndTime = $endTime
+          } -ErrorAction SilentlyContinue |
+            Select-Object TimeCreated, Id, Message
+          if ($events) {
+            $events | ConvertTo-Json -Depth 3
+          } else {
+            Write-Output '{"events": [], "message": "Nenhum evento crítico do AD encontrado"}'
+          }
+        } catch {
+          Write-Output '{"events": [], "message": "Erro ao coletar eventos do AD: $($_.Exception.Message)"}'
+        }
+      register: ad_events
+      ignore_errors: yes
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
+
+    - name: Exibir eventos críticos do Active Directory
+      debug:
+        var: ad_events.stdout
+      when: ad_events.stdout is defined and ad_events.stdout | length > 0
+
+    - name: Registrar eventos críticos do Active Directory
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Eventos críticos do AD={{ ad_events.stdout | default('Nenhum dado') }}"
+        create: yes
+      delegate_to: localhost
+      when: ad_events is defined
+
+    - name: Resumo da saúde do DC
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Resumo - Replicação={{ replication_status.stdout | default('Nenhum') }}, Serviços={{ critical_services_status.stdout | default('Nenhum') }}, Disco={{ disk_space.stdout | default('Nenhum') }}, Eventos AD={{ ad_events.stdout | default('Nenhum') }}"
+        create: yes
+      delegate_to: localhost

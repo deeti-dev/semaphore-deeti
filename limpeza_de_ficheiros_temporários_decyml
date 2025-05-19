@@ -1,0 +1,209 @@
+---
+- name: Limpar arquivos temporários no %temp% de todos os usuários e obter o tamanho
+  hosts: dec
+  gather_facts: yes
+  ignore_unreachable: yes
+  vars:
+    exclude_log_files: true
+  tasks:
+    - name: Verificar conectividade WinRM
+      win_ping:
+      register: ping_result
+      ignore_errors: yes
+      ignore_unreachable: yes
+
+    - name: Logar erro de conectividade
+      debug:
+        msg: "Erro de conectividade WinRM em {{ inventory_hostname }}: {{ ping_result.msg | default('Desconhecido') }}"
+      when: ping_result.failed is defined and ping_result.failed
+
+    - name: Verificar permissões do usuário inacom\ansible
+      win_shell: whoami
+      become: yes
+      become_user: inacom\ansible
+      register: user_check
+      ignore_errors: yes
+      timeout: 30
+      when: ping_result.failed is not defined or not ping_result.failed
+
+    - name: Logar permissões do usuário
+      debug:
+        msg: "Usuário inacom\\ansible: {{ user_check.stdout | default('Não identificado') }}"
+      when: user_check is defined and user_check.stdout is defined
+
+    - name: Obter lista de diretórios de usuários em C:\Users
+      win_shell: |
+        $excludedUsers = @('All Users', 'Default', 'Default User', 'KINagSvc', 'Public')
+        try {
+          if (-not (Test-Path 'C:\Users')) {
+            Write-Output "Erro: Diretório C:\Users não acessível"
+            exit 1
+          }
+          $userDirs = Get-ChildItem -Path 'C:\Users' -Directory -ErrorAction Stop | Where-Object { $excludedUsers -notcontains $_.Name } | Select-Object -ExpandProperty FullName
+          if ($userDirs) {
+            $userDirs -join ','
+          } else {
+            Write-Output "Erro: Nenhum diretório de usuário encontrado"
+          }
+        } catch {
+          Write-Output "Erro ao listar diretórios: $($_.Exception.Message)"
+        }
+      register: user_directories
+      become: yes
+      become_user: inacom\ansible
+      ignore_errors: yes
+      timeout: 30
+      when: ping_result.failed is not defined or not ping_result.failed
+
+    - name: Debugar saída bruta de diretórios
+      debug:
+        msg: "Saída bruta de user_directories.stdout: {{ user_directories.stdout | default('Nenhuma saída') }}"
+      when: user_directories is defined
+
+    - name: Debugar lista de diretórios de usuários
+      debug:
+        msg: "Diretórios de usuários encontrados: {{ user_directories.stdout | replace('\r\n', '') }}"
+      when:
+        - user_directories.failed is not defined or not user_directories.failed
+        - user_directories.stdout is defined
+        - user_directories.stdout != ""
+        - user_directories.stdout != "Erro: Nenhum diretório de usuário encontrado"
+        - not (user_directories.stdout | default('') | regex_search('^Erro'))
+
+    - name: Calcular tamanho e limpar pastas %temp%
+      win_shell: |
+        $userDirs = "{{ user_directories.stdout | replace('\r\n', '') }}".Split(',', [StringSplitOptions]::RemoveEmptyEntries)
+        $totalSizeBefore = 0
+        $totalSizeAfter = 0
+        $cleanupResults = @()
+        $remainingFiles = @()
+        $lockedFilesCount = 0
+        $excludeLogFiles = {{ exclude_log_files | to_json }}
+        try {
+          foreach ($dir in $userDirs) {
+            $tempDir = Join-Path -Path $dir.Trim() -ChildPath 'AppData\Local\Temp'
+            if (Test-Path $tempDir) {
+              # Calcular tamanho antes
+              $sizeBefore = (Get-ChildItem -Path $tempDir -File -Recurse -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
+              if ($sizeBefore -ne $null) { $totalSizeBefore += $sizeBefore }
+              if ($sizeBefore -lt 1MB) {
+                $cleanupResults += "Pasta ${tempDir} ignorada: tamanho insignificante (< 1 MB)"
+                continue
+              }
+              # Tentar limpeza
+              try {
+                $files = Get-ChildItem -Path $tempDir -File -Recurse -ErrorAction Stop
+                if ($excludeLogFiles) {
+                  $files = $files | Where-Object { $_.Extension -notin @('.log', '.db', '.db-shm', '.db-wal') }
+                }
+                foreach ($file in $files) {
+                  try {
+                    Remove-Item -Path $file.FullName -Force -ErrorAction Stop
+                  } catch {
+                    if ($_.Exception.Message -match "O processo não pode aceder ao ficheiro.*está a ser utilizado por outro processo") {
+                      $cleanupResults += "Arquivo em uso: $($file.FullName)"
+                      $lockedFilesCount += 1
+                    } else {
+                      $cleanupResults += "Erro ao excluir $($file.FullName): $($_.Exception.Message)"
+                    }
+                  }
+                }
+                $cleanupResults += "Limpeza bem-sucedida em ${tempDir}"
+              } catch {
+                $cleanupResults += "Erro ao limpar ${tempDir}: $($_.Exception.Message)"
+              }
+              # Calcular tamanho depois
+              $sizeAfter = (Get-ChildItem -Path $tempDir -File -Recurse -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
+              if ($sizeAfter -ne $null) { $totalSizeAfter += $sizeAfter }
+              # Listar arquivos remanescentes
+              $files = Get-ChildItem -Path $tempDir -File -Recurse -ErrorAction SilentlyContinue
+              if ($files) {
+                $fileCount = $files.Count
+                $remainingFiles += "${tempDir}: $fileCount arquivos remanescentes"
+              } else {
+                $remainingFiles += "Nenhum arquivo remanescente em ${tempDir}"
+              }
+            } else {
+              $cleanupResults += "Pasta não encontrada: ${tempDir}"
+            }
+          }
+          $cleanupResults += "Total de arquivos em uso: $lockedFilesCount"
+          $output = @{
+            SizeBeforeGB = if ($totalSizeBefore -eq 0) { "0" } else { [math]::Round($totalSizeBefore / 1GB, 2) }
+            SizeAfterGB = if ($totalSizeAfter -eq 0) { "0" } else { [math]::Round($totalSizeAfter / 1GB, 2) }
+            CleanupResults = $cleanupResults -join ';'
+            RemainingFiles = $remainingFiles -join ';'
+          }
+          ConvertTo-Json $output
+        } catch {
+          Write-Output "Erro crítico no script: $($_.Exception.Message)"
+          exit 1
+        }
+      register: temp_operation
+      become: yes
+      become_user: inacom\ansible
+      ignore_errors: yes
+      timeout: 300
+      environment:
+        ANSIBLE_WINRM_READ_TIMEOUT: 60
+      when:
+        - ping_result.failed is not defined or not ping_result.failed
+        - user_directories.failed is not defined or not user_directories.failed
+        - user_directories.stdout is defined
+        - user_directories.stdout != ""
+        - user_directories.stdout != "Erro: Nenhum diretório de usuário encontrado"
+        - not (user_directories.stdout | default('') | regex_search('^Erro'))
+
+    - name: Verificar falha na limpeza
+      debug:
+        msg: "Falha na limpeza: {{ temp_operation.stderr | default('Nenhum erro reportado') }}"
+      when: temp_operation.failed is defined and temp_operation.failed
+
+    - name: Exibir tamanho antes da limpeza
+      debug:
+        msg: "Tamanho total das pastas %temp% antes: {{ (temp_operation.stdout | from_json).SizeBeforeGB }} GB"
+      when:
+        - temp_operation.failed is not defined or not temp_operation.failed
+        - temp_operation.stdout is defined
+        - temp_operation.stdout != ""
+
+    - name: Exibir resultados da limpeza
+      debug:
+        msg: "Resultados da limpeza: {{ (temp_operation.stdout | from_json).CleanupResults }}"
+      when:
+        - temp_operation.failed is not defined or not temp_operation.failed
+        - temp_operation.stdout is defined
+        - temp_operation.stdout != ""
+
+    - name: Exibir arquivos remanescentes
+      debug:
+        msg: "Arquivos remanescentes: {{ (temp_operation.stdout | from_json).RemainingFiles }}"
+      when:
+        - temp_operation.failed is not defined or not temp_operation.failed
+        - temp_operation.stdout is defined
+        - temp_operation.stdout != ""
+
+    - name: Exibir tamanho após a limpeza
+      debug:
+        msg: "Tamanho total das pastas %temp% depois: {{ (temp_operation.stdout | from_json).SizeAfterGB }} GB"
+      when:
+        - temp_operation.failed is not defined or not temp_operation.failed
+        - temp_operation.stdout is defined
+        - temp_operation.stdout != ""
+
+    - name: Informar resultado final da limpeza
+      debug:
+        msg: "Limpeza das pastas %temp% concluída. Tamanho antes: {{ (temp_operation.stdout | from_json).SizeBeforeGB }} GB, Tamanho depois: {{ (temp_operation.stdout | from_json).SizeAfterGB }} GB, Economia de espaço: {{ ((temp_operation.stdout | from_json).SizeBeforeGB | float) - ((temp_operation.stdout | from_json).SizeAfterGB | float) }} GB"
+      when:
+        - temp_operation.failed is not defined or not temp_operation.failed
+        - temp_operation.stdout is defined
+        - temp_operation.stdout != ""
+
+    - name: Resumir erros de limpeza
+      debug:
+        msg: "Erros encontrados durante a limpeza: {{ ((temp_operation.stdout | from_json).CleanupResults | split(';') | select('search', 'Erro|Arquivo em uso') | list) | join(';') | default('Nenhum erro') }}"
+      when:
+        - temp_operation.failed is not defined or not temp_operation.failed
+        - temp_operation.stdout is defined
+        - temp_operation.stdout != ""
+        - (temp_operation.stdout | from_json).CleanupResults | regex_search('Erro|Arquivo em uso')

@@ -6,9 +6,10 @@
   vars:
     log_path: /tmp/system_integrity_report.log
     winrm_port: 5985
-    cpu_threshold: 80  # Porcentagem máxima de CPU para prosseguir
-    dism_timeout: 600  # 10 minutos para DISM
-    sfc_timeout: 900   # 15 minutos para SFC
+    cpu_threshold: 80
+    dism_timeout: 900  # Aumentado para 15 minutos
+    sfc_timeout: 900
+    free_space_threshold: 10  # % mínima de espaço livre
   tasks:
     - name: Verificar conectividade na porta WinRM
       ansible.builtin.wait_for:
@@ -43,6 +44,36 @@
     - name: Pular se CPU alta
       meta: end_host
       when: cpu_load.stdout is defined and "CPU alta" in cpu_load.stdout
+
+    - name: Verificar espaço livre no disco do sistema
+      win_shell: |
+        try {
+          $volume = Get-Volume | Where-Object { $_.DriveLetter -eq $env:SystemDrive[0] }
+          $freePercent = [math]::Round(($volume.SizeRemaining / $volume.Size) * 100, 2)
+          if ($freePercent -lt {{ free_space_threshold }}) {
+            Write-Output '{"status": "low_space", "free_percent": ' + $freePercent + ', "message": "Espaço livre crítico no disco do sistema"}'
+          } else {
+            Write-Output '{"status": "ok", "free_percent": ' + $freePercent + ', "message": "Espaço livre suficiente"}'
+          }
+        } catch {
+          Write-Output '{"status": "error", "free_percent": 0, "message": "Erro ao verificar espaço: ' + ($_.Exception.Message -replace '"', '""') + '"}'
+        }
+      register: disk_space
+      ignore_errors: yes
+      timeout: 120
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
+
+    - name: Logar resultado do espaço em disco
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Espaço em disco={{ disk_space.stdout | default('Nenhum dado') }}"
+        create: yes
+      delegate_to: localhost
+      when: disk_space.stdout is defined
+
+    - name: Pular se espaço em disco insuficiente
+      meta: end_host
+      when: disk_space.stdout is defined and (disk_space.stdout | from_json | default({}) | json_query('status') == 'low_space')
 
     - name: Executar DISM /scanhealth
       win_shell: |

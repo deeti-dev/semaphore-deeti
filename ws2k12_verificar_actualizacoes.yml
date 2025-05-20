@@ -1,1 +1,109 @@
+---
+- name: Verificar e instalar atualizações nos Servidores WS2k19
+  hosts: ws2k12
+  gather_facts: no
+  ignore_unreachable: yes
+  vars:
+    log_path: /tmp/update_check_report.log
+    reboot_time: "21:00"
+  tasks:
+    - name: Verificar conectividade na porta WinRM
+      ansible.builtin.wait_for:
+        host: "{{ inventory_hostname }}"
+        port: 5985
+        state: started
+        timeout: 60
+        connect_timeout: 60
+      register: winrm_connect
+      ignore_errors: yes
+      ignore_unreachable: yes
+      delegate_to: localhost
 
+    - name: Logar erro de conectividade
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Erro de conectividade - {{ winrm_connect.msg | default('Falha ao conectar') }}"
+        create: yes
+      delegate_to: localhost
+      when: winrm_connect.failed is defined and winrm_connect.failed
+
+    - name: Verificar atualizações pendentes
+      win_updates:
+        state: searched
+        category_names:
+          - SecurityUpdates
+          - UpdateRollups
+      register: update_result
+      ignore_errors: yes
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
+
+    - name: Exibir as atualizações encontradas
+      debug:
+        var: update_result.updates
+        verbosity: 2
+      when: update_result.updates is defined and update_result.updates | length > 0
+
+    - name: Instalar atualizações pendentes
+      win_updates:
+        state: installed
+        category_names:
+          - SecurityUpdates
+          - UpdateRollups
+      register: install_result
+      ignore_errors: yes
+      when:
+        - winrm_connect.failed is not defined or not winrm_connect.failed
+        - update_result.found_update_count is defined and update_result.found_update_count > 0
+
+    - name: Verificar necessidade de reinicialização
+      debug:
+        msg: "{{ inventory_hostname }} precisa reiniciar: {{ install_result.reboot_required | default(false) }}"
+      when:
+        - install_result is defined
+        - install_result.reboot_required is defined
+
+    - name: Registrar necessidade de reinicialização no log
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Reboot necessário={{ install_result.reboot_required | default(false) }}"
+        create: yes
+      delegate_to: localhost
+      when:
+        - install_result is defined
+        - install_result.reboot_required is defined and install_result.reboot_required
+
+    - name: Agendar reinício às 21h
+      win_shell: |
+        try {
+          $taskName = "ScheduledReboot_{{ inventory_hostname | replace('.', '_') }}"
+          $triggerTime = "{{ reboot_time }}"
+          $today = Get-Date -Format "yyyy-MM-dd"
+          $trigger = "$today $triggerTime"
+          $action = New-ScheduledTaskAction -Execute "shutdown.exe" -Argument "/r /t 60 /c 'Reinício agendado para atualizações do sistema'"
+          $triggerObj = New-ScheduledTaskTrigger -Once -At $trigger
+          Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $triggerObj -Description "Reinício agendado para atualizações" -User "System" -Force
+          Write-Output '{"task_name": "' + $taskName + '", "scheduled_time": "' + $trigger + '", "message": "Reinício agendado com sucesso"}'
+        } catch {
+          Write-Output '{"task_name": "' + $taskName + '", "scheduled_time": "' + $trigger + '", "message": "Erro ao agendar reinício: $($_.Exception.Message)"}'
+        }
+      register: reboot_schedule
+      ignore_errors: yes
+      when:
+        - install_result is defined
+        - install_result.reboot_required is defined and install_result.reboot_required
+
+    - name: Logar agendamento do reinício
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Reinício agendado={{ reboot_schedule.stdout | default('Nenhum dado') }}"
+        create: yes
+      delegate_to: localhost
+      when: reboot_schedule.stdout is defined
+
+    - name: Registrar resultados no log
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Atualizações encontradas={{ update_result.found_update_count | default(0) }}, Atualizações instaladas={{ install_result.installed_update_count | default(0) }}, Reboot necessário={{ install_result.reboot_required | default(false) }}, Reboot agendado={{ reboot_schedule.stdout | default('Nenhum') | to_json }}, Detalhes={{ update_result.updates | default({}) | to_json }}"
+        create: yes
+      delegate_to: localhost
+      when: update_result is defined or install_result is defined

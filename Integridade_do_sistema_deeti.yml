@@ -1,0 +1,139 @@
+---
+- name: Verificar integridade do sistema em máquinas Windows
+  hosts: deeti
+  gather_facts: no
+  ignore_unreachable: yes
+  vars:
+    log_path: /tmp/system_integrity_report.log
+    winrm_port: 5985
+    cpu_threshold: 80  # Porcentagem máxima de CPU para prosseguir
+    dism_timeout: 600  # 10 minutos para DISM
+    sfc_timeout: 900   # 15 minutos para SFC
+  tasks:
+    - name: Verificar conectividade na porta WinRM
+      ansible.builtin.wait_for:
+        host: "{{ inventory_hostname }}"
+        port: "{{ winrm_port }}"
+        state: started
+        timeout: 60
+        connect_timeout: 60
+      register: winrm_connect
+      ignore_errors: yes
+      ignore_unreachable: yes
+      delegate_to: localhost
+
+    - name: Logar erro de conectividade
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Erro de conectividade - {{ winrm_connect.msg | default('Falha ao conectar') }}"
+        create: yes
+      delegate_to: localhost
+      when: winrm_connect.failed is defined and winrm_connect.failed
+
+    - name: Verificar carga do host
+      win_shell: |
+        $cpu = (Get-Counter -Counter "\Processor(_Total)\% Processor Time").CounterSamples.CookedValue
+        if ($cpu -gt {{ cpu_threshold }}) { Write-Output "CPU alta: $cpu percent" }
+        else { Write-Output "CPU OK: $cpu percent" }
+      register: cpu_load
+      ignore_errors: yes
+      timeout: 120
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
+
+    - name: Pular se CPU alta
+      meta: end_host
+      when: cpu_load.stdout is defined and "CPU alta" in cpu_load.stdout
+
+    - name: Executar DISM /scanhealth
+      win_shell: |
+        try {
+          $result = dism /online /cleanup-image /scanhealth
+          $exitCode = $LASTEXITCODE
+          $output = $result -join "`n"
+          if ($output -match "The component store is repairable" -or $exitCode -ne 0) {
+            Write-Output '{"status": "repairable", "exit_code": ' + $exitCode + ', "output": "' + ($output -replace '"', '""') + '"}'
+          } else {
+            Write-Output '{"status": "healthy", "exit_code": ' + $exitCode + ', "output": "' + ($output -replace '"', '""') + '"}'
+          }
+        } catch {
+          Write-Output '{"status": "error", "exit_code": -1, "output": "Erro ao executar DISM /scanhealth: ' + ($_.Exception.Message -replace '"', '""') + '"}'
+        }
+      register: dism_scan
+      ignore_errors: yes
+      timeout: "{{ dism_timeout }}"
+      when: winrm_connect.failed is not defined or not winrm_connect.failed
+
+    - name: Logar resultado do DISM /scanhealth
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: DISM scanhealth={{ dism_scan.stdout | default('Nenhum dado') }}"
+        create: yes
+      delegate_to: localhost
+      when: dism_scan.stdout is defined
+
+    - name: Executar DISM /restorehealth
+      win_shell: |
+        try {
+          $result = dism /online /cleanup-image /restorehealth
+          $exitCode = $LASTEXITCODE
+          $output = $result -join "`n"
+          Write-Output '{"status": "' + ($exitCode -eq 0 ? 'success' : 'failed') + '", "exit_code": ' + $exitCode + ', "output": "' + ($output -replace '"', '""') + '"}'
+        } catch {
+          Write-Output '{"status": "error", "exit_code": -1, "output": "Erro ao executar DISM /restorehealth: ' + ($_.Exception.Message -replace '"', '""') + '"}'
+        }
+      register: dism_restore
+      ignore_errors: yes
+      timeout: "{{ dism_timeout }}"
+      when:
+        - winrm_connect.failed is not defined or not winrm_connect.failed
+        - dism_scan.stdout is defined
+        - dism_scan.stdout | from_json | default({}) | json_query('status') == 'repairable'
+
+    - name: Logar resultado do DISM /restorehealth
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: DISM restorehealth={{ dism_restore.stdout | default('Não executado') }}"
+        create: yes
+      delegate_to: localhost
+      when: dism_restore.stdout is defined
+
+    - name: Executar sfc /scannow
+      win_shell: |
+        try {
+          $result = sfc /scannow
+          $exitCode = $LASTEXITCODE
+          $output = $result -join "`n"
+          if ($output -match "found corrupt files and successfully repaired") {
+            Write-Output '{"status": "repaired", "exit_code": ' + $exitCode + ', "output": "' + ($output -replace '"', '""') + '"}'
+          } elseif ($output -match "found corrupt files but was unable to fix") {
+            Write-Output '{"status": "corrupt", "exit_code": ' + $exitCode + ', "output": "' + ($output -replace '"', '""') + '"}'
+          } else {
+            Write-Output '{"status": "healthy", "exit_code": ' + $exitCode + ', "output": "' + ($output -replace '"', '""') + '"}'
+          }
+        } catch {
+          Write-Output '{"status": "error", "exit_code": -1, "output": "Erro ao executar sfc /scannow: ' + ($_.Exception.Message -replace '"', '""') + '"}'
+        }
+      register: sfc_scan
+      ignore_errors: yes
+      timeout: "{{ sfc_timeout }}"
+      when:
+        - winrm_connect.failed is not defined or not winrm_connect.failed
+        - dism_scan.stdout is defined
+        - dism_scan.stdout | from_json | default({}) | json_query('status') in ['healthy', 'repairable']
+        - dism_restore.stdout is defined implies (dism_restore.stdout | from_json | default({}) | json_query('status') == 'success')
+
+    - name: Logar resultado do sfc /scannow
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: SFC scannow={{ sfc_scan.stdout | default('Não executado') }}"
+        create: yes
+      delegate_to: localhost
+      when: sfc_scan.stdout is defined
+
+    - name: Resumir resultados
+      ansible.builtin.lineinfile:
+        path: "{{ log_path }}"
+        line: "{{ inventory_hostname }}: Resumo - DISM scanhealth={{ dism_scan.stdout | default('N/A') | to_json }}, DISM restorehealth={{ dism_restore.stdout | default('Não executado') | to_json }}, SFC scannow={{ sfc_scan.stdout | default('Não executado') | to_json }}"
+        create: yes
+      delegate_to: localhost
+      when: dism_scan.stdout is defined or dism_restore.stdout is defined or sfc_scan.stdout is defined

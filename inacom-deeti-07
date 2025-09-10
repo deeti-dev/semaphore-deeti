@@ -1,0 +1,40 @@
+
+- name: Verificar processos que estão a consumir mais CPU 
+  hosts:
+    - inacom-deeti-07 
+  gather_facts: no
+  ignore_unreachable: yes
+
+  tasks:
+    - name: Listar os processos que consomem mais CPU (excluindo svchost)
+      win_shell: |
+        $listSet = Get-Counter -ListSet Processo -ErrorAction SilentlyContinue
+        if ($null -eq $listSet) {
+          Write-Output "N/A - Contadores de desempenho 'Processo' não encontrados neste host."
+        } else {
+          $counterPath = $listSet.Paths | Where-Object { $_ -like '*\*% de Tempo do Processador' } | Select-Object -First 1
+          $results = Get-Counter -Counter $counterPath -MaxSamples 1 |
+          Select-Object -ExpandProperty CounterSamples |
+          Where-Object { $_.InstanceName -notin @('svchost','_total','idle') } |
+          Select-Object @{Name="Name";Expression={$_.InstanceName}}, 
+                        @{Name="CPU %";Expression={[math]::round($_.CookedValue / [Environment]::ProcessorCount, 2)}} |
+          Sort-Object "CPU %" -Descending |
+          Select-Object -First 20
+          if ($results) { $results | Format-Table -AutoSize | Out-String }
+          else { "Nenhum processo encontrado." }
+        }
+      register: process_cpu
+      ignore_errors: yes
+
+    - name: Log erro ou inacessibilidade
+      debug:
+        msg: >
+          Host {{ inventory_hostname }} falhou ou está inacessível.
+          Stderr: {{ process_cpu.stderr | default('') }}
+          Stdout: {{ process_cpu.stdout | default('') }}
+      when: process_cpu is failed or (process_cpu.stderr is defined and process_cpu.stderr != "")
+
+    - name: Exibir processos de maior CPU
+      debug:
+        msg: "{{ process_cpu.stdout }}"
+      when: process_cpu is succeeded and process_cpu.stdout is defined and process_cpu.stdout != ""

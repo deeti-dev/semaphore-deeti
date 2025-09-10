@@ -10,7 +10,7 @@
         $listSet = Get-Counter -ListSet Processo -ErrorAction SilentlyContinue
         if ($null -eq $listSet) {
           Write-Output "Contadores de desempenho 'Processo' não encontrados. Verifique a configuração do sistema."
-          exit 0
+          return
         }
         $counterPath = $listSet.Paths | Where-Object { $_ -like '*\*% de Tempo do Processador' } | Select-Object -First 1
         Get-Counter -Counter $counterPath -MaxSamples 1 |

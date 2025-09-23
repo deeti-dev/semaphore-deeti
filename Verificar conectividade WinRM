@@ -1,0 +1,7 @@
+- name: Verificar conectividade WinRM
+  hosts: all
+  gather_facts: no
+
+  tasks:
+    - name: Testar WinRM com win_ping
+      win_ping:

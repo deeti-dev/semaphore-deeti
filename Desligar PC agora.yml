@@ -9,13 +9,13 @@
         msg: "Host={{ inventory_hostname }} | os_product_type={{ ansible_facts.os_product_type | default('DESCONHECIDO') }}"
 
     - name: OK - É PC (Workstation)
-      shutdown:
+      debug:
         msg: "OK: {{ inventory_hostname }} é PC (workstation) e seria desligado."
       when:
         - (ansible_facts.os_product_type | default('')) == "workstation"
 
     - name: IGNORADO - É Windows Server ou não identificado
-      shutdown:
+      debug:
         msg: "IGNORADO: {{ inventory_hostname }} é servidor ou não identificado (não será desligado)."
       when:
         - (ansible_facts.os_product_type | default('')) != "workstation"

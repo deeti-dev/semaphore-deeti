@@ -1,21 +1,16 @@
 ---
-- name: TESTE - Mostrar quais PCs seriam desligados (ignorar Windows Server)
+- name: DESLIGAR AGORA - Somente PCs Windows (ignorar Windows Server)
   hosts: deeti
   gather_facts: yes
 
   tasks:
-    - name: Mostrar tipo do Windows detectado
-      debug:
-        msg: "Host={{ inventory_hostname }} | os_product_type={{ ansible_facts.os_product_type | default('DESCONHECIDO') }}"
-
-    - name: OK - É PC (Workstation)
-      debug:
-        msg: "OK: {{ inventory_hostname }} é PC (workstation) e seria desligado."
+    - name: Desligar apenas Windows Workstation
+      win_shell: shutdown /s /f /t 0
       when:
         - (ansible_facts.os_product_type | default('')) == "workstation"
 
-    - name: IGNORADO - É Windows Server ou não identificado
+    - name: Ignorar Windows Server
       debug:
-        msg: "IGNORADO: {{ inventory_hostname }} é servidor ou não identificado (não será desligado)."
+        msg: "IGNORADO: {{ inventory_hostname }} é Windows Server (não será desligado)."
       when:
         - (ansible_facts.os_product_type | default('')) != "workstation"

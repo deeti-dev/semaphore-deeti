@@ -1,0 +1,21 @@
+---
+- name: TESTE - Mostrar quais PCs seriam desligados (ignorar Windows Server)
+  hosts: inacom-deeti-07
+  gather_facts: yes
+
+  tasks:
+    - name: Mostrar tipo do Windows detectado
+      shutdown:
+        msg: "Host={{ inventory_hostname }} | os_product_type={{ ansible_facts.os_product_type | default('DESCONHECIDO') }}"
+
+    - name: OK - É PC (Workstation)
+      shutdown:
+        msg: "OK: {{ inventory_hostname }} é PC (workstation) e seria desligado."
+      when:
+        - (ansible_facts.os_product_type | default('')) == "workstation"
+
+    - name: IGNORADO - É Windows Server ou não identificado
+      shutdown:
+        msg: "IGNORADO: {{ inventory_hostname }} é servidor ou não identificado (não será desligado)."
+      when:
+        - (ansible_facts.os_product_type | default('')) != "workstation"

@@ -5,7 +5,7 @@
 
   tasks:
     - name: Mostrar tipo do Windows detectado
-      shutdown:
+      debug:
         msg: "Host={{ inventory_hostname }} | os_product_type={{ ansible_facts.os_product_type | default('DESCONHECIDO') }}"
 
     - name: OK - É PC (Workstation)

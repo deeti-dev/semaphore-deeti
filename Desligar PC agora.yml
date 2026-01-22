@@ -1,6 +1,6 @@
 ---
 - name: TESTE - Mostrar quais PCs seriam desligados (ignorar Windows Server)
-  hosts: inacom-deeti-07
+  hosts: deeti
   gather_facts: yes
 
   tasks:

@@ -1,6 +1,6 @@
 ---
 - name: DESLIGAR AGORA - Somente PCs Windows (ignorar Windows Server)
-  hosts: deeti
+  hosts: todos
   gather_facts: yes
 
   tasks:

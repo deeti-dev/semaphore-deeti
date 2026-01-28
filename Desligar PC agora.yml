@@ -3,7 +3,7 @@
   hosts: 
     - todos
   gather_facts: yes
-
+  ignore_unreachable: yes
   tasks:
     - name: Desligar apenas Windows Workstation
       win_shell: shutdown /s /f /t 0

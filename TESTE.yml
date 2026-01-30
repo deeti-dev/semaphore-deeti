@@ -1,6 +1,6 @@
 ---
 - name: DESLIGAR ESTAÇÕES - Windows 7/8/10/11 (Ignorar Windows Server)
-  hosts: inacom-deeti-07
+  hosts: inacom-dafsg-19
   gather_facts: yes
   ignore_unreachable: yes
 

@@ -1,78 +1,20 @@
 ---
-- name: DESLIGAR ESTAÇÕES - Windows 7/8/10/11 (Ignorar Windows Server)
-  hosts: inacom-deeti-07
+- name: DESLIGAR AGORA - Somente PCs Windows (ignorar Windows Server)
+  hosts: inacom-dafsg-19
   gather_facts: yes
   ignore_unreachable: yes
 
-  vars:
-    csv_report: "./logs/desligamento.csv"
-
-  pre_tasks:
-
-    - name: Criar pasta de logs (se não existir)
-      ansible.builtin.file:
-        path: "./logs"
-        state: directory
-        mode: '0755'
-      delegate_to: localhost
-      run_once: true
-
-    - name: Criar CSV caso não exista
-      ansible.builtin.copy:
-        dest: "{{ csv_report }}"
-        content: "hostname;status;usuario_logado;data_hora\n"
-      delegate_to: localhost
-      run_once: true
-      when: not lookup('ansible.builtin.fileglob', csv_report)
-
   tasks:
 
-    - name: Verificar usuário logado
-      win_shell: (Get-CimInstance -ClassName Win32_ComputerSystem).UserName
-      register: user_logged_raw
-
-    - name: Tratar usuário logado
-      set_fact:
-        usuario_logado: "{{ user_logged_raw.stdout | default('N/A') }}"
-
-    - name: Detectar se é server
-      set_fact:
-        is_server: "{{ 'Server' in ansible_facts.os_name }}"
-
-    - name: Notificar usuário (somente estações)
-      win_shell: msg * "Seu computador será desligado em 1 minuto por manutenção."
-      when:
-        - not is_server
-        - usuario_logado != ""
-
-    - name: Aguardar 60 segundos antes do desligamento
-      pause:
-        seconds: 60
-      when:
-        - not is_server
-
-    - name: Desligar estação
+    - name: Desligar apenas Windows Workstation (Windows 7/8/10/11)
       win_shell: shutdown /s /f /t 0
-      register: shutdown_result
       when:
-        - not is_server
+        - ansible_facts.os_family == "Windows"
+        - "'Server' not in ansible_facts.os_name"
 
-    - name: Registrar no CSV (estação desligada)
-      ansible.builtin.lineinfile:
-        path: "{{ csv_report }}"
-        line: "{{ inventory_hostname }};DESLIGADO;{{ usuario_logado }};{{ ansible_date_time.iso8601 }}"
-      delegate_to: localhost
-      when:
-        - not is_server
-
-    - name: Registrar no CSV (servidor ignorado)
-      ansible.builtin.lineinfile:
-        path: "{{ csv_report }}"
-        line: "{{ inventory_hostname }};IGNORADO_SERVER;{{ usuario_logado }};{{ ansible_date_time.iso8601 }}"
-      delegate_to: localhost
-      when: is_server
-
-    - name: Mensagem no console (servidor ignorado)
+    - name: Ignorar Windows Server
       debug:
-        msg: "IGNORADO: {{ inventory_hostname }} é Windows Server."
-      when: is_server
+        msg: "IGNORADO: {{ inventory_hostname }} é Windows Server (não será desligado)."
+      when:
+        - ansible_facts.os_family == "Windows"
+        - "'Server' in ansible_facts.os_name"

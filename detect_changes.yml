@@ -1,5 +1,6 @@
 ---
-- name: Detectar tarefas alteradas no sistema (detalhado)
+- name: detect_changes.yml
+ (detalhado)
   hosts: all
   become: yes
   gather_facts: no

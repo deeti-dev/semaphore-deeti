@@ -1,0 +1,56 @@
+---
+- name: Detectar tarefas alteradas no sistema (detalhado)
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  vars:
+    tarefas_alteradas: []
+
+  tasks:
+
+    - name: Garantir que nginx está instalado
+      apt:
+        name: nginx
+        state: present
+      register: nginx_result
+
+    - name: Adicionar tarefa nginx à lista se houve alteração
+      set_fact:
+        tarefas_alteradas: "{{ tarefas_alteradas + [ {'tarefa': 'Instalar nginx', 'resultado': nginx_result} ] }}"
+      when: nginx_result.changed
+
+    - name: Criar ficheiro de teste
+      file:
+        path: /tmp/teste_inacom.txt
+        state: touch
+      register: file_result
+
+    - name: Adicionar tarefa file à lista se houve alteração
+      set_fact:
+        tarefas_alteradas: "{{ tarefas_alteradas + [ {'tarefa': 'Criar ficheiro teste', 'resultado': file_result} ] }}"
+      when: file_result.changed
+
+    - name: Copiar ficheiro de configuração
+      copy:
+        content: "config INACOM"
+        dest: /tmp/config_inacom.conf
+      register: copy_result
+
+    - name: Adicionar tarefa copy à lista se houve alteração
+      set_fact:
+        tarefas_alteradas: "{{ tarefas_alteradas + [ {'tarefa': 'Copiar configuração', 'resultado': copy_result} ] }}"
+      when: copy_result.changed
+
+    # 🔍 Resultado final
+    - name: Mostrar tarefas que foram alteradas
+      debug:
+        msg: >
+          {% if tarefas_alteradas | length > 0 %}
+          Tarefas que causaram alteração:
+          {% for t in tarefas_alteradas %}
+          - {{ t.tarefa }}
+          {% endfor %}
+          {% else %}
+          Nenhuma tarefa alterou o sistema.
+          {% endif %}

@@ -6,23 +6,14 @@
 # Uso:
 #   ansible-playbook disk_performance.yml -e "target_host=INACOM-DRHTI-03"
 #
-# No Semaphore, configurar uma Survey Variable chamada "target_host" para receber
-# o host_name vindo do payload do Zabbix (via n8n).
+# No Semaphore, configurar uma Survey Variable / Environment variable chamada "target_host"
+# para receber o host_name vindo do payload do Zabbix (via n8n).
 
 - name: Diagnóstico de performance de disco
   hosts: "{{ target_host }}"
   gather_facts: no
-  vars:
-    report_dir_remote: "C:\\Temp\\diagnostics"
-    report_file_remote: "C:\\Temp\\diagnostics\\disk_performance_{{ ansible_date_time.iso8601_basic_short | default(lookup('pipe', 'date +%Y%m%d_%H%M%S')) }}.txt"
-    report_dir_local: "./reports/{{ inventory_hostname }}"
 
   tasks:
-
-    - name: Garantir que a pasta de diagnóstico existe no host remoto
-      ansible.windows.win_file:
-        path: "{{ report_dir_remote }}"
-        state: directory
 
     # Passo 1 — Top processos por I/O de leitura
     - name: "Passo 1 - Top processos por I/O de leitura"
@@ -53,7 +44,7 @@
             Start-Sleep -Seconds 15
         } | Format-Table -AutoSize | Out-String -Width 300
       register: passo2_monitor_tempo_real
-      # Este passo demora cerca de 2 minutos (8 x 15s) - aumentar o timeout da conexão WinRM se necessário
+      # Este passo demora cerca de 2 minutos (8 x 15s)
       async: 300
       poll: 30
 
@@ -155,18 +146,18 @@
       register: passo7_espaco_disco
       failed_when: false
       changed_when: false
-      
+
     - name: Mostrar resultado do Passo 7
       ansible.builtin.debug:
         msg: "{{ passo7_espaco_disco.stdout_lines }}"
 
-        # Consolidar tudo num relatório em memória
+    # Consolidar tudo num relatório em memória
     - name: Gerar relatório consolidado
       ansible.builtin.set_fact:
         full_report: |
           ================================================================
           DIAGNÓSTICO DE PERFORMANCE DE DISCO - {{ inventory_hostname }}
-          Data: {{ ansible_date_time.iso8601 }}
+          Data: {{ lookup('pipe', 'date') }}
           ================================================================
 
           --- PASSO 1: Top processos por I/O ---

@@ -1,0 +1,191 @@
+---
+# disk_performance.yml
+# Diagnóstico de performance de disco em hosts Windows
+# Disparado via Semaphore, chamado pelo n8n quando a tag "playbook: disk_performance" chega do Zabbix
+#
+# Uso:
+#   ansible-playbook disk_performance.yml -e "target_host=INACOM-DRHTI-03"
+#
+# No Semaphore, configurar uma Survey Variable chamada "target_host" para receber
+# o host_name vindo do payload do Zabbix (via n8n).
+
+- name: Diagnóstico de performance de disco
+  hosts: "{{ target_host }}"
+  gather_facts: no
+  vars:
+    report_dir_remote: "C:\\Temp\\diagnostics"
+    report_file_remote: "C:\\Temp\\diagnostics\\disk_performance_{{ ansible_date_time.iso8601_basic_short | default(lookup('pipe', 'date +%Y%m%d_%H%M%S')) }}.txt"
+    report_dir_local: "./reports/{{ inventory_hostname }}"
+
+  tasks:
+
+    - name: Garantir que a pasta de diagnóstico existe no host remoto
+      ansible.windows.win_file:
+        path: "{{ report_dir_remote }}"
+        state: directory
+
+    # Passo 1 — Top processos por I/O de leitura
+    - name: "Passo 1 - Top processos por I/O de leitura"
+      ansible.windows.win_shell: |
+        Get-Process | Sort-Object -Property ReadOperationCount -Descending |
+        Select-Object -First 10 Name, Id, ReadOperationCount, ReadTransferCount |
+        Format-Table -AutoSize | Out-String -Width 300
+      register: passo1_top_io_leitura
+
+    - name: Mostrar resultado do Passo 1
+      ansible.builtin.debug:
+        msg: "{{ passo1_top_io_leitura.stdout_lines }}"
+
+    # Passo 2 — Monitorizar disco em tempo real (2 minutos)
+    - name: "Passo 2 - Monitorizar disco em tempo real (2 minutos)"
+      ansible.windows.win_shell: |
+        1..8 | ForEach-Object {
+            $disk = Get-CimInstance Win32_PerfFormattedData_PerfDisk_PhysicalDisk |
+                    Where-Object Name -ne "_Total"
+            [PSCustomObject]@{
+                Hora        = (Get-Date).ToString("HH:mm:ss")
+                Disco       = $disk.Name
+                "Leit ms"   = $disk.AvgDiskSecPerRead * 1000
+                "Escr ms"   = $disk.AvgDiskSecPerWrite * 1000
+                "Fila leit" = $disk.AvgDiskReadQueueLength
+                "% Ocupado" = $disk.PercentDiskReadTime
+            }
+            Start-Sleep -Seconds 15
+        } | Format-Table -AutoSize | Out-String -Width 300
+      register: passo2_monitor_tempo_real
+      # Este passo demora cerca de 2 minutos (8 x 15s) - aumentar o timeout da conexão WinRM se necessário
+      async: 180
+      poll: 15
+
+    - name: Mostrar resultado do Passo 2
+      ansible.builtin.debug:
+        msg: "{{ passo2_monitor_tempo_real.stdout_lines | default(['(sem output - verificar execução assíncrona)']) }}"
+
+    # Passo 3 — Verificar saúde do disco (SMART)
+    - name: "Passo 3 - Saúde dos discos físicos"
+      ansible.windows.win_shell: |
+        Get-PhysicalDisk | Select-Object FriendlyName, MediaType, HealthStatus, Size, BusType |
+        Format-Table -AutoSize | Out-String -Width 300
+      register: passo3_saude_fisica
+
+    - name: Mostrar resultado do Passo 3 (discos físicos)
+      ansible.builtin.debug:
+        msg: "{{ passo3_saude_fisica.stdout_lines }}"
+
+    - name: "Passo 3 - SMART (pode não funcionar em RAID)"
+      ansible.windows.win_shell: |
+        Get-WmiObject -Namespace root\wmi -Class MSStorageDriver_FailurePredictStatus |
+        Select-Object InstanceName, PredictFailure, Reason | Format-Table -AutoSize | Out-String -Width 300
+      register: passo3_smart
+      failed_when: false
+      # SMART pode falhar em discos atrás de controladores RAID - não deve quebrar o playbook
+
+    - name: Mostrar resultado do Passo 3 (SMART)
+      ansible.builtin.debug:
+        msg: "{{ passo3_smart.stdout_lines | default(['SMART indisponível (possível RAID)']) }}"
+
+    # Passo 4 — Erros de disco nos últimos 7 dias
+    - name: "Passo 4 - Erros de disco nos últimos 7 dias"
+      ansible.windows.win_shell: |
+        Get-WinEvent -FilterHashtable @{
+            LogName   = 'System'
+            Level     = 2
+            StartTime = (Get-Date).AddDays(-7)
+        } | Where-Object { $_.ProviderName -match "disk|ntfs|volmgr|storport" } |
+        Select-Object TimeCreated, ProviderName, Message |
+        Format-Table -AutoSize -Wrap | Out-String -Width 300
+      register: passo4_erros_evento
+      failed_when: false
+      # Pode não haver eventos no período - não deve quebrar o playbook
+
+    - name: Mostrar resultado do Passo 4
+      ansible.builtin.debug:
+        msg: "{{ passo4_erros_evento.stdout_lines | default(['Sem erros de disco nos últimos 7 dias']) }}"
+
+    # Passo 5 — Processos svchost com I/O detalhado
+    - name: "Passo 5 - I/O detalhado dos processos svchost"
+      ansible.windows.win_shell: |
+        Get-Process -Name "svchost*" |
+        Select-Object Name, Id,
+            @{N="RAM(MB)";E={[math]::Round($_.WorkingSet/1MB,1)}},
+            @{N="Read(MB)";E={[math]::Round($_.ReadTransferCount/1MB,1)}},
+            @{N="Write(MB)";E={[math]::Round($_.WriteTransferCount/1MB,1)}},
+            CPU |
+        Sort-Object CPU -Descending |
+        Format-Table -AutoSize | Out-String -Width 300
+      register: passo5_svchost_io
+
+    - name: Mostrar resultado do Passo 5
+      ansible.builtin.debug:
+        msg: "{{ passo5_svchost_io.stdout_lines }}"
+
+    # Passo 6 — Uptime de serviços suspeitos (svchost)
+    - name: "Passo 6 - Uptime dos processos svchost"
+      ansible.windows.win_shell: |
+        Get-Process -Name "svchost" |
+        Select-Object Id, CPU,
+            @{N="RAM(MB)";E={[math]::Round($_.WorkingSet/1MB,1)}},
+            @{N="Uptime(h)";E={[math]::Round((New-TimeSpan $_.StartTime).TotalHours,1)}} |
+        Format-Table -AutoSize | Out-String -Width 300
+      register: passo6_uptime_svchost
+
+    - name: Mostrar resultado do Passo 6
+      ansible.builtin.debug:
+        msg: "{{ passo6_uptime_svchost.stdout_lines }}"
+
+    # Passo 7 — Espaço em disco
+    - name: "Passo 7 - Espaço em disco (C, D, E)"
+      ansible.windows.win_shell: |
+        Get-PSDrive C,D,E -ErrorAction SilentlyContinue | Select-Object Name,
+            @{N="Total(GB)";E={[math]::Round($_.Used/1GB+$_.Free/1GB,1)}},
+            @{N="Usado(GB)";E={[math]::Round($_.Used/1GB,1)}},
+            @{N="Livre(GB)";E={[math]::Round($_.Free/1GB,1)}},
+            @{N="Livre(%)";E={[math]::Round($_.Free/($_.Used+$_.Free)*100,1)}} |
+        Format-Table -AutoSize | Out-String -Width 300
+      register: passo7_espaco_disco
+
+    - name: Mostrar resultado do Passo 7
+      ansible.builtin.debug:
+        msg: "{{ passo7_espaco_disco.stdout_lines }}"
+
+    # Consolidar tudo num único relatório e gravar no host remoto
+    - name: Gravar relatório consolidado no host remoto
+      ansible.windows.win_copy:
+        dest: "{{ report_file_remote }}"
+        content: |
+          ================================================================
+          DIAGNÓSTICO DE PERFORMANCE DE DISCO - {{ inventory_hostname }}
+          Executado em: {{ lookup('pipe', 'date') }}
+          ================================================================
+
+          --- PASSO 1: Top processos por I/O de leitura ---
+          {{ passo1_top_io_leitura.stdout }}
+
+          --- PASSO 2: Monitorização em tempo real (2 min) ---
+          {{ passo2_monitor_tempo_real.stdout | default('sem dados') }}
+
+          --- PASSO 3: Saúde dos discos físicos ---
+          {{ passo3_saude_fisica.stdout }}
+
+          --- PASSO 3: SMART ---
+          {{ passo3_smart.stdout | default('SMART indisponível') }}
+
+          --- PASSO 4: Erros de disco (últimos 7 dias) ---
+          {{ passo4_erros_evento.stdout | default('sem erros') }}
+
+          --- PASSO 5: I/O detalhado svchost ---
+          {{ passo5_svchost_io.stdout }}
+
+          --- PASSO 6: Uptime svchost ---
+          {{ passo6_uptime_svchost.stdout }}
+
+          --- PASSO 7: Espaço em disco ---
+          {{ passo7_espaco_disco.stdout }}
+
+    # Trazer o relatório para a máquina de controlo (Semaphore), para poder anexar
+    # a um ticket no GLPI ou devolver ao n8n como resultado
+    - name: Copiar relatório para a máquina de controlo
+      ansible.builtin.fetch:
+        src: "{{ report_file_remote }}"
+        dest: "{{ report_dir_local }}/"
+        flat: yes

@@ -136,18 +136,26 @@
     # Passo 7 — Espaço em disco
     - name: "Passo 7 - Espaço em disco (C, D, E)"
       ansible.windows.win_shell: |
-        Get-PSDrive C,D,E -ErrorAction SilentlyContinue | Where-Object { $_.Used + $_.Free -gt 0 } | Select-Object Name,
-            @{N="Total(GB)";E={[math]::Round($_.Used/1GB+$_.Free/1GB,1)}},
-            @{N="Usado(GB)";E={[math]::Round($_.Used/1GB,1)}},
-            @{N="Livre(GB)";E={[math]::Round($_.Free/1GB,1)}},
-            @{N="Livre(%)";E={
-                if ($_.Used + $_.Free -gt 0) {
-                    [math]::Round($_.Free/($_.Used+$_.Free)*100,1)
-                } else { 0 }
-            }} |
-        Format-Table -AutoSize | Out-String -Width 300
+        $drives = Get-PSDrive C,D,E -ErrorAction SilentlyContinue | 
+                  Where-Object { $_.Used + $_.Free -gt 0 }
+        
+        if ($drives) {
+            $drives | Select-Object Name,
+                @{N="Total(GB)";E={[math]::Round(($_.Used + $_.Free)/1GB,1)}},
+                @{N="Usado(GB)";E={[math]::Round($_.Used/1GB,1)}},
+                @{N="Livre(GB)";E={[math]::Round($_.Free/1GB,1)}},
+                @{N="Livre(%)";E={
+                    if ($_.Used + $_.Free -gt 0) { 
+                        [math]::Round($_.Free / ($_.Used + $_.Free) * 100, 1) 
+                    } else { 0 }
+                }}
+        } else {
+            "Nenhum drive encontrado com espaço."
+        } | Format-Table -AutoSize | Out-String -Width 300
       register: passo7_espaco_disco
-
+      failed_when: false
+      changed_when: false
+      
     - name: Mostrar resultado do Passo 7
       ansible.builtin.debug:
         msg: "{{ passo7_espaco_disco.stdout_lines }}"

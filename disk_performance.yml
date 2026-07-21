@@ -129,9 +129,9 @@
       ansible.windows.win_shell: |
         $drives = Get-PSDrive C,D,E -ErrorAction SilentlyContinue | 
                   Where-Object { $_.Used + $_.Free -gt 0 }
-        
+
         if ($drives) {
-            $drives | Select-Object Name,
+            $resultado = $drives | Select-Object Name,
                 @{N="Total(GB)";E={[math]::Round(($_.Used + $_.Free)/1GB,1)}},
                 @{N="Usado(GB)";E={[math]::Round($_.Used/1GB,1)}},
                 @{N="Livre(GB)";E={[math]::Round($_.Free/1GB,1)}},
@@ -141,8 +141,10 @@
                     } else { 0 }
                 }}
         } else {
-            "Nenhum drive encontrado com espaço."
-        } | Format-Table -AutoSize | Out-String -Width 300
+            $resultado = "Nenhum drive encontrado com espaço."
+        }
+
+        $resultado | Format-Table -AutoSize | Out-String -Width 300
       register: passo7_espaco_disco
       failed_when: false
       changed_when: false

@@ -54,7 +54,7 @@
         } | Format-Table -AutoSize | Out-String -Width 300
       register: passo2_monitor_tempo_real
       # Este passo demora cerca de 2 minutos (8 x 15s) - aumentar o timeout da conexão WinRM se necessário
-      async: 180
+      async: 200
       poll: 15
 
     - name: Mostrar resultado do Passo 2

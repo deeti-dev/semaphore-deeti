@@ -160,44 +160,43 @@
       ansible.builtin.debug:
         msg: "{{ passo7_espaco_disco.stdout_lines }}"
 
-    # Consolidar tudo num único relatório e gravar no host remoto
-    - name: Gravar relatório consolidado no host remoto
-      ansible.windows.win_copy:
-        dest: "{{ report_file_remote }}"
-        content: |
+        # Consolidar tudo num relatório em memória
+    - name: Gerar relatório consolidado
+      ansible.builtin.set_fact:
+        full_report: |
           ================================================================
           DIAGNÓSTICO DE PERFORMANCE DE DISCO - {{ inventory_hostname }}
-          Executado em: {{ lookup('pipe', 'date') }}
+          Data: {{ ansible_date_time.iso8601 }}
           ================================================================
 
-          --- PASSO 1: Top processos por I/O de leitura ---
-          {{ passo1_top_io_leitura.stdout }}
+          --- PASSO 1: Top processos por I/O ---
+          {{ passo1_top_io_leitura.stdout | default('Sem dados') }}
 
-          --- PASSO 2: Monitorização em tempo real (2 min) ---
-          {{ passo2_monitor_tempo_real.stdout | default('sem dados') }}
+          --- PASSO 2: Monitorização em tempo real ---
+          {{ passo2_monitor_tempo_real.stdout | default('Sem dados') }}
 
-          --- PASSO 3: Saúde dos discos físicos ---
-          {{ passo3_saude_fisica.stdout }}
+          --- PASSO 3: Saúde dos discos ---
+          {{ passo3_saude_fisica.stdout | default('Sem dados') }}
 
           --- PASSO 3: SMART ---
           {{ passo3_smart.stdout | default('SMART indisponível') }}
 
-          --- PASSO 4: Erros de disco (últimos 7 dias) ---
-          {{ passo4_erros_evento.stdout | default('sem erros') }}
+          --- PASSO 4: Erros de disco (7 dias) ---
+          {{ passo4_erros_evento.stdout | default('Sem erros') }}
 
-          --- PASSO 5: I/O detalhado svchost ---
-          {{ passo5_svchost_io.stdout }}
+          --- PASSO 5: svchost I/O ---
+          {{ passo5_svchost_io.stdout | default('Sem dados') }}
 
           --- PASSO 6: Uptime svchost ---
-          {{ passo6_uptime_svchost.stdout }}
+          {{ passo6_uptime_svchost.stdout | default('Sem dados') }}
 
           --- PASSO 7: Espaço em disco ---
-          {{ passo7_espaco_disco.stdout }}
+          {{ passo7_espaco_disco.stdout | default('Sem dados') }}
 
-    # Trazer o relatório para a máquina de controlo (Semaphore), para poder anexar
-    # a um ticket no GLPI ou devolver ao n8n como resultado
-    - name: Copiar relatório para a máquina de controlo
-      ansible.builtin.fetch:
-        src: "{{ report_file_remote }}"
-        dest: "{{ report_dir_local }}/"
-        flat: yes
+    - name: Mostrar relatório final (para Semaphore/n8n)
+      ansible.builtin.debug:
+        msg: "{{ full_report }}"
+
+    - name: Retornar relatório como output do playbook
+      ansible.builtin.set_fact:
+        diagnostic_report: "{{ full_report }}"

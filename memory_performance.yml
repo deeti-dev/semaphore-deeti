@@ -214,28 +214,28 @@
           ================================================================
 
           --- PASSO 1: RAM total e disponível ---
-          {{ passo1_ram_total.stdout | default('Sem dados') }}
+          {{ (passo1_ram_total.stdout | trim) if passo1_ram_total.stdout else 'Sem dados' }}
 
           --- PASSO 2: Pages/sec em tempo real (contador do alerta) ---
-          {{ passo2_pages_sec.stdout | default('Sem dados') }}
+          {{ (passo2_pages_sec.stdout | trim) if passo2_pages_sec.stdout else 'Sem dados' }}
 
           --- PASSO 3: Ficheiro de paginação ---
-          {{ passo3_pagefile.stdout | default('Sem dados') }}
+          {{ (passo3_pagefile.stdout | trim) if passo3_pagefile.stdout else 'Sem dados' }}
 
           --- PASSO 4: Top 10 processos por RAM ---
-          {{ passo4_top_ram.stdout | default('Sem dados') }}
+          {{ (passo4_top_ram.stdout | trim) if passo4_top_ram.stdout else 'Sem dados' }}
 
           --- PASSO 5: Top processos por Page Faults/sec ---
-          {{ (passo5_page_faults.stdout | regex_replace('\r?\n?TOP_PROCESS_MARKER::.*', '')) if passo5_page_faults.stdout else 'Sem dados' }}
+          {{ (passo5_page_faults.stdout | regex_replace('\r?\n?TOP_PROCESS_MARKER::.*', '') | trim) if passo5_page_faults.stdout else 'Sem dados' }}
 
           --- PASSO 6: Monitorização do processo '{{ top_fault_process }}' (2 min) ---
-          {{ passo6_monitor_processo.stdout | default('Sem dados') }}
+          {{ (passo6_monitor_processo.stdout | trim) if passo6_monitor_processo.stdout else 'Sem dados' }}
 
           --- PASSO 7: Estado do Kaspersky (avp) ---
-          {{ passo7_avp_estado.stdout | default('Sem dados') }}
+          {{ (passo7_avp_estado.stdout | trim) if passo7_avp_estado.stdout else 'Sem dados' }}
 
           --- PASSO 7: Monitorização do avp (2 min) ---
-          {{ passo7_avp_monitor.stdout | default('Ignorado - avp não estava em execução') }}
+          {{ (passo7_avp_monitor.stdout | trim) if passo7_avp_monitor.stdout else 'Ignorado - avp não estava em execução' }}
 
     - name: Mostrar relatório final (para Semaphore/n8n)
       ansible.builtin.debug:

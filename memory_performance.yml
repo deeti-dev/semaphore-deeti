@@ -5,7 +5,7 @@
 # (cobre alertas como "The Memory Pages/sec is too high")
 #
 # Uso:
-#   ansible-playbook memory_performance.yml -e "target_host=PC-08"
+#   ansible-playbook memory_performance.yml -e "target_host=INACOM-NUC-08"
 #
 # No Semaphore, configurar a Environment variable "target_host" (Variable Group "Webhook Vars")
 # para receber o host_name vindo do payload do Zabbix (via n8n).
@@ -41,16 +41,17 @@
 
     # Passo 2 — Monitorizar o contador real por trás do alerta (Pages/sec), em tempo real
     # Isto confirma se a paginação está mesmo a acontecer agora, e com que intensidade
-    # Nota: usamos o prefixo \\<hostname>\009\ para forçar o nome do contador em inglês,
-    # já que em Windows com idioma PT os nomes "Memory"/"Pages/sec" podem estar traduzidos
-    # e o Get-Counter falha silenciosamente a encontrá-los.
+    # Nota: usamos Get-CimInstance (WMI) em vez de Get-Counter, porque o Get-Counter (API PDH)
+    # é conhecido por falhar silenciosamente em sessões remotas via WinRM (limitação de
+    # "double-hop"/token de rede). O CIM já está confirmado a funcionar neste ambiente
+    # (é o mesmo mecanismo usado no disk_performance.yml).
     - name: "Passo 2 - Monitorizar Pages/sec em tempo real (2 minutos)"
       ansible.windows.win_shell: |
         1..8 | ForEach-Object {
-            $c = Get-Counter "\\$env:COMPUTERNAME\009\Memory\Pages/sec"
+            $c = Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory
             [PSCustomObject]@{
                 Hora        = (Get-Date).ToString("HH:mm:ss")
-                "Pages/sec" = [math]::Round($c.CounterSamples[0].CookedValue, 1)
+                "Pages/sec" = $c.PagesPersec
             }
             Start-Sleep -Seconds 15
         } | Format-Table -AutoSize | Out-String -Width 300
@@ -96,12 +97,10 @@
     # Passo 5 — Top processos por Page Faults/sec (indicador mais direto da causa da paginação)
     - name: "Passo 5 - Top processos por Page Faults/sec"
       ansible.windows.win_shell: |
-        $samples = (Get-Counter "\\$env:COMPUTERNAME\009\Process(*)\Page Faults/sec").CounterSamples |
-            Where-Object { $_.InstanceName -notin @('_total','idle') -and $_.CookedValue -gt 0 } |
-            Sort-Object CookedValue -Descending | Select-Object -First 10
-
-        $samples | Select-Object InstanceName,
-            @{N="PageFaults/sec";E={[math]::Round($_.CookedValue,1)}} |
+        Get-CimInstance Win32_PerfFormattedData_PerfProc_Process |
+            Where-Object { $_.Name -notin @('_Total','Idle') -and $_.PageFaultsPersec -gt 0 } |
+            Sort-Object PageFaultsPersec -Descending | Select-Object -First 10 Name,
+                @{N="PageFaults/sec";E={$_.PageFaultsPersec}} |
         Format-Table -AutoSize | Out-String -Width 300
       register: passo5_page_faults
       failed_when: false
@@ -114,9 +113,9 @@
     # Usamos Page Faults em vez de RAM porque está mais diretamente ligado à causa do alerta
     - name: Identificar processo com mais Page Faults/sec (para monitorização dinâmica)
       ansible.windows.win_shell: |
-        $top = (Get-Counter "\\$env:COMPUTERNAME\009\Process(*)\Page Faults/sec").CounterSamples |
-            Where-Object { $_.InstanceName -notin @('_total','idle') -and $_.CookedValue -gt 0 } |
-            Sort-Object CookedValue -Descending | Select-Object -First 1 -ExpandProperty InstanceName
+        $top = Get-CimInstance Win32_PerfFormattedData_PerfProc_Process |
+            Where-Object { $_.Name -notin @('_Total','Idle') -and $_.PageFaultsPersec -gt 0 } |
+            Sort-Object PageFaultsPersec -Descending | Select-Object -First 1 -ExpandProperty Name
         # Remove sufixo "#N" que o Windows usa para distinguir instâncias duplicadas (ex: chrome#3 -> chrome)
         if ($top) { $top -replace '#\d+$', '' }
       register: passo5b_top_processo

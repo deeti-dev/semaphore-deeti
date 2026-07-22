@@ -99,40 +99,34 @@
     # segurança (lsass) porque o playbook faz muitas consultas Get-CimInstance seguidas,
     # o que "acorda" esses processos e infla artificialmente os seus valores - não é um
     # sinal real do host, é o próprio diagnóstico a medir-se a si mesmo.
+    #
+    # Nota: a tabela e o "processo alvo" para o Passo 6 vêm da MESMA consulta (uma única
+    # chamada ao WMI). Antes eram duas consultas separadas em momentos diferentes, e como
+    # estes contadores mudam a cada instante, o "top 1" podia divergir entre a tabela
+    # mostrada e o processo realmente monitorizado a seguir.
     - name: "Passo 5 - Top processos por Page Faults/sec"
       ansible.windows.win_shell: |
-        Get-CimInstance Win32_PerfFormattedData_PerfProc_Process |
+        $procs = Get-CimInstance Win32_PerfFormattedData_PerfProc_Process |
             Where-Object {
                 $_.Name -notin @('_Total','Idle') -and
                 $_.Name -notmatch '^(WmiPrvSE|unsecapp|lsass)' -and
                 $_.PageFaultsPersec -gt 0
             } |
-            Sort-Object PageFaultsPersec -Descending | Select-Object -First 10 Name,
-                @{N="PageFaults/sec";E={$_.PageFaultsPersec}} |
-        Format-Table -AutoSize | Out-String -Width 300
+            Sort-Object PageFaultsPersec -Descending | Select-Object -First 10 Name, PageFaultsPersec
+
+        $procs | Select-Object Name, @{N="PageFaults/sec";E={$_.PageFaultsPersec}} |
+            Format-Table -AutoSize | Out-String -Width 300
+
+        if ($procs) {
+            # Marcador interno para o Ansible extrair o processo alvo - removido do relatório final
+            "TOP_PROCESS_MARKER::$($procs[0].Name -replace '#\d+$','')"
+        }
       register: passo5_page_faults
       failed_when: false
 
     - name: Mostrar resultado do Passo 5
       ansible.builtin.debug:
-        msg: "{{ passo5_page_faults.stdout_lines | default(['Sem dados de page faults']) }}"
-
-    # Identificar (de forma automática) o processo com mais Page Faults/sec, para monitorizar no Passo 6
-    # Usamos Page Faults em vez de RAM porque está mais diretamente ligado à causa do alerta
-    # (mesma exclusão de ruído do Passo 5 acima)
-    - name: Identificar processo com mais Page Faults/sec (para monitorização dinâmica)
-      ansible.windows.win_shell: |
-        $top = Get-CimInstance Win32_PerfFormattedData_PerfProc_Process |
-            Where-Object {
-                $_.Name -notin @('_Total','Idle') -and
-                $_.Name -notmatch '^(WmiPrvSE|unsecapp|lsass)' -and
-                $_.PageFaultsPersec -gt 0
-            } |
-            Sort-Object PageFaultsPersec -Descending | Select-Object -First 1 -ExpandProperty Name
-        # Remove sufixo "#N" que o Windows usa para distinguir instâncias duplicadas (ex: chrome#3 -> chrome)
-        if ($top) { $top -replace '#\d+$', '' }
-      register: passo5b_top_processo
-      failed_when: false
+        msg: "{{ passo5_page_faults.stdout | regex_replace('\\n?TOP_PROCESS_MARKER::.*', '') }}"
 
     # Fallback: se o Page Faults/sec não devolver nada (ex: contadores indisponíveis),
     # usamos o processo com mais RAM (Passo 4) em vez de um valor fixo pouco útil
@@ -145,9 +139,8 @@
     - name: Definir variável do processo alvo
       ansible.builtin.set_fact:
         top_fault_process: >-
-          {{ (passo5b_top_processo.stdout | trim)
-             if (passo5b_top_processo.stdout | trim)
-             else (passo5c_top_ram_processo.stdout | trim) }}
+          {% set marcador = passo5_page_faults.stdout | regex_search('TOP_PROCESS_MARKER::(.+)', '\\1') %}
+          {{ (marcador | first) if marcador else (passo5c_top_ram_processo.stdout | trim) }}
 
     # Passo 6 — Monitorizar RAM/CPU do processo identificado acima (2 minutos)
     - name: "Passo 6 - Monitorizar processo '{{ top_fault_process }}' (2 minutos)"
@@ -233,7 +226,7 @@
           {{ passo4_top_ram.stdout | default('Sem dados') }}
 
           --- PASSO 5: Top processos por Page Faults/sec ---
-          {{ passo5_page_faults.stdout | default('Sem dados') }}
+          {{ (passo5_page_faults.stdout | regex_replace('\n?TOP_PROCESS_MARKER::.*', '')) if passo5_page_faults.stdout else 'Sem dados' }}
 
           --- PASSO 6: Monitorização do processo '{{ top_fault_process }}' (2 min) ---
           {{ passo6_monitor_processo.stdout | default('Sem dados') }}

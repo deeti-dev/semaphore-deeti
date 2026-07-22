@@ -5,7 +5,7 @@
 # (cobre alertas como "The Memory Pages/sec is too high")
 #
 # Uso:
-#   ansible-playbook memory_performance.yml -e "target_host=INACOM-NUC-08"
+#   ansible-playbook memory_performance.yml -e "target_host=PC-08"
 #
 # No Semaphore, configurar a Environment variable "target_host" (Variable Group "Webhook Vars")
 # para receber o host_name vindo do payload do Zabbix (via n8n).
@@ -95,10 +95,18 @@
         msg: "{{ passo4_top_ram.stdout_lines }}"
 
     # Passo 5 — Top processos por Page Faults/sec (indicador mais direto da causa da paginação)
+    # Excluímos processos ligados ao próprio WMI (WmiPrvSE, unsecapp) e ao subsistema de
+    # segurança (lsass) porque o playbook faz muitas consultas Get-CimInstance seguidas,
+    # o que "acorda" esses processos e infla artificialmente os seus valores - não é um
+    # sinal real do host, é o próprio diagnóstico a medir-se a si mesmo.
     - name: "Passo 5 - Top processos por Page Faults/sec"
       ansible.windows.win_shell: |
         Get-CimInstance Win32_PerfFormattedData_PerfProc_Process |
-            Where-Object { $_.Name -notin @('_Total','Idle') -and $_.PageFaultsPersec -gt 0 } |
+            Where-Object {
+                $_.Name -notin @('_Total','Idle') -and
+                $_.Name -notmatch '^(WmiPrvSE|unsecapp|lsass)' -and
+                $_.PageFaultsPersec -gt 0
+            } |
             Sort-Object PageFaultsPersec -Descending | Select-Object -First 10 Name,
                 @{N="PageFaults/sec";E={$_.PageFaultsPersec}} |
         Format-Table -AutoSize | Out-String -Width 300
@@ -111,10 +119,15 @@
 
     # Identificar (de forma automática) o processo com mais Page Faults/sec, para monitorizar no Passo 6
     # Usamos Page Faults em vez de RAM porque está mais diretamente ligado à causa do alerta
+    # (mesma exclusão de ruído do Passo 5 acima)
     - name: Identificar processo com mais Page Faults/sec (para monitorização dinâmica)
       ansible.windows.win_shell: |
         $top = Get-CimInstance Win32_PerfFormattedData_PerfProc_Process |
-            Where-Object { $_.Name -notin @('_Total','Idle') -and $_.PageFaultsPersec -gt 0 } |
+            Where-Object {
+                $_.Name -notin @('_Total','Idle') -and
+                $_.Name -notmatch '^(WmiPrvSE|unsecapp|lsass)' -and
+                $_.PageFaultsPersec -gt 0
+            } |
             Sort-Object PageFaultsPersec -Descending | Select-Object -First 1 -ExpandProperty Name
         # Remove sufixo "#N" que o Windows usa para distinguir instâncias duplicadas (ex: chrome#3 -> chrome)
         if ($top) { $top -replace '#\d+$', '' }

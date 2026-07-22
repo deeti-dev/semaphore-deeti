@@ -41,10 +41,13 @@
 
     # Passo 2 — Monitorizar o contador real por trás do alerta (Pages/sec), em tempo real
     # Isto confirma se a paginação está mesmo a acontecer agora, e com que intensidade
+    # Nota: usamos o prefixo \\<hostname>\009\ para forçar o nome do contador em inglês,
+    # já que em Windows com idioma PT os nomes "Memory"/"Pages/sec" podem estar traduzidos
+    # e o Get-Counter falha silenciosamente a encontrá-los.
     - name: "Passo 2 - Monitorizar Pages/sec em tempo real (2 minutos)"
       ansible.windows.win_shell: |
         1..8 | ForEach-Object {
-            $c = Get-Counter '\Memory\Pages/sec'
+            $c = Get-Counter "\\$env:COMPUTERNAME\009\Memory\Pages/sec"
             [PSCustomObject]@{
                 Hora        = (Get-Date).ToString("HH:mm:ss")
                 "Pages/sec" = [math]::Round($c.CounterSamples[0].CookedValue, 1)
@@ -93,7 +96,7 @@
     # Passo 5 — Top processos por Page Faults/sec (indicador mais direto da causa da paginação)
     - name: "Passo 5 - Top processos por Page Faults/sec"
       ansible.windows.win_shell: |
-        $samples = (Get-Counter '\Process(*)\Page Faults/sec').CounterSamples |
+        $samples = (Get-Counter "\\$env:COMPUTERNAME\009\Process(*)\Page Faults/sec").CounterSamples |
             Where-Object { $_.InstanceName -notin @('_total','idle') -and $_.CookedValue -gt 0 } |
             Sort-Object CookedValue -Descending | Select-Object -First 10
 
@@ -111,7 +114,7 @@
     # Usamos Page Faults em vez de RAM porque está mais diretamente ligado à causa do alerta
     - name: Identificar processo com mais Page Faults/sec (para monitorização dinâmica)
       ansible.windows.win_shell: |
-        $top = (Get-Counter '\Process(*)\Page Faults/sec').CounterSamples |
+        $top = (Get-Counter "\\$env:COMPUTERNAME\009\Process(*)\Page Faults/sec").CounterSamples |
             Where-Object { $_.InstanceName -notin @('_total','idle') -and $_.CookedValue -gt 0 } |
             Sort-Object CookedValue -Descending | Select-Object -First 1 -ExpandProperty InstanceName
         # Remove sufixo "#N" que o Windows usa para distinguir instâncias duplicadas (ex: chrome#3 -> chrome)
@@ -119,9 +122,20 @@
       register: passo5b_top_processo
       failed_when: false
 
+    # Fallback: se o Page Faults/sec não devolver nada (ex: contadores indisponíveis),
+    # usamos o processo com mais RAM (Passo 4) em vez de um valor fixo pouco útil
+    - name: Identificar processo com mais RAM (fallback caso Page Faults falhe)
+      ansible.windows.win_shell: |
+        Get-Process | Sort-Object WorkingSet -Descending | Select-Object -First 1 -ExpandProperty Name
+      register: passo5c_top_ram_processo
+      failed_when: false
+
     - name: Definir variável do processo alvo
       ansible.builtin.set_fact:
-        top_fault_process: "{{ (passo5b_top_processo.stdout | trim) if (passo5b_top_processo.stdout | trim) else 'System' }}"
+        top_fault_process: >-
+          {{ (passo5b_top_processo.stdout | trim)
+             if (passo5b_top_processo.stdout | trim)
+             else (passo5c_top_ram_processo.stdout | trim) }}
 
     # Passo 6 — Monitorizar RAM/CPU do processo identificado acima (2 minutos)
     - name: "Passo 6 - Monitorizar processo '{{ top_fault_process }}' (2 minutos)"

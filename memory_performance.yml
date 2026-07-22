@@ -5,10 +5,15 @@
 # (cobre alertas como "The Memory Pages/sec is too high")
 #
 # Uso:
-#   ansible-playbook memory_performance.yml -e "target_host=INACOM-NUC-08"
+#   ansible-playbook memory_performance.yml -e "target_host=PC-08"
 #
 # No Semaphore, configurar a Environment variable "target_host" (Variable Group "Webhook Vars")
 # para receber o host_name vindo do payload do Zabbix (via n8n).
+#
+# Nota de design: o alerta "Pages/sec Too High" mede PAGINAÇÃO (troca RAM <-> disco sob
+# pressão de memória), não apenas "quem usa mais RAM". Por isso este playbook mede o
+# contador real por trás do alerta e identifica processos por Page Faults/sec, além do
+# tradicional ranking por RAM (que serve de contexto, mas não é a causa direta).
 
 - name: Diagnóstico de performance de memória
   hosts: "{{ target_host }}"
@@ -34,54 +39,111 @@
       ansible.builtin.debug:
         msg: "{{ passo1_ram_total.stdout_lines }}"
 
-    # Passo 2 — Top 10 processos que mais consomem RAM
-    - name: "Passo 2 - Top 10 processos por consumo de RAM"
+    # Passo 2 — Monitorizar o contador real por trás do alerta (Pages/sec), em tempo real
+    # Isto confirma se a paginação está mesmo a acontecer agora, e com que intensidade
+    - name: "Passo 2 - Monitorizar Pages/sec em tempo real (2 minutos)"
+      ansible.windows.win_shell: |
+        1..8 | ForEach-Object {
+            $c = Get-Counter '\Memory\Pages/sec'
+            [PSCustomObject]@{
+                Hora        = (Get-Date).ToString("HH:mm:ss")
+                "Pages/sec" = [math]::Round($c.CounterSamples[0].CookedValue, 1)
+            }
+            Start-Sleep -Seconds 15
+        } | Format-Table -AutoSize | Out-String -Width 300
+      register: passo2_pages_sec
+      failed_when: false
+      async: 300
+      poll: 30
+
+    - name: Mostrar resultado do Passo 2
+      ansible.builtin.debug:
+        msg: "{{ passo2_pages_sec.stdout_lines | default(['(sem output - verificar execução assíncrona)']) }}"
+
+    # Passo 3 — Estado do ficheiro de paginação
+    - name: "Passo 3 - Estado do ficheiro de paginação"
+      ansible.windows.win_shell: |
+        Get-CimInstance Win32_PageFileUsage |
+        Select-Object Name,
+            @{N="Alocado(MB)";E={$_.AllocatedBaseSize}},
+            @{N="Uso Atual(MB)";E={$_.CurrentUsage}},
+            @{N="Pico Uso(MB)";E={$_.PeakUsage}} |
+        Format-Table -AutoSize | Out-String -Width 300
+      register: passo3_pagefile
+      failed_when: false
+
+    - name: Mostrar resultado do Passo 3
+      ansible.builtin.debug:
+        msg: "{{ passo3_pagefile.stdout_lines | default(['Sem ficheiro de paginação configurado']) }}"
+
+    # Passo 4 — Top 10 processos que mais consomem RAM (contexto geral)
+    - name: "Passo 4 - Top 10 processos por consumo de RAM"
       ansible.windows.win_shell: |
         Get-Process | Sort-Object WorkingSet -Descending |
         Select-Object -First 10 Name,
             @{N="RAM(MB)";E={[math]::Round($_.WorkingSet/1MB,1)}},
             CPU |
         Format-Table -AutoSize | Out-String -Width 300
-      register: passo2_top_ram
+      register: passo4_top_ram
 
-    - name: Mostrar resultado do Passo 2
+    - name: Mostrar resultado do Passo 4
       ansible.builtin.debug:
-        msg: "{{ passo2_top_ram.stdout_lines }}"
+        msg: "{{ passo4_top_ram.stdout_lines }}"
 
-    # Identificar (de forma automática) o processo que mais consome RAM, para o Passo 3
-    # Isto substitui a necessidade de "substituir nome_do_processo manualmente" do script original
-    - name: Identificar processo com maior consumo de RAM (para monitorização dinâmica)
+    # Passo 5 — Top processos por Page Faults/sec (indicador mais direto da causa da paginação)
+    - name: "Passo 5 - Top processos por Page Faults/sec"
       ansible.windows.win_shell: |
-        (Get-Process | Sort-Object WorkingSet -Descending | Select-Object -First 1 -ExpandProperty Name)
-      register: passo2b_top_processo
+        $samples = (Get-Counter '\Process(*)\Page Faults/sec').CounterSamples |
+            Where-Object { $_.InstanceName -notin @('_total','idle') -and $_.CookedValue -gt 0 } |
+            Sort-Object CookedValue -Descending | Select-Object -First 10
+
+        $samples | Select-Object InstanceName,
+            @{N="PageFaults/sec";E={[math]::Round($_.CookedValue,1)}} |
+        Format-Table -AutoSize | Out-String -Width 300
+      register: passo5_page_faults
+      failed_when: false
+
+    - name: Mostrar resultado do Passo 5
+      ansible.builtin.debug:
+        msg: "{{ passo5_page_faults.stdout_lines | default(['Sem dados de page faults']) }}"
+
+    # Identificar (de forma automática) o processo com mais Page Faults/sec, para monitorizar no Passo 6
+    # Usamos Page Faults em vez de RAM porque está mais diretamente ligado à causa do alerta
+    - name: Identificar processo com mais Page Faults/sec (para monitorização dinâmica)
+      ansible.windows.win_shell: |
+        $top = (Get-Counter '\Process(*)\Page Faults/sec').CounterSamples |
+            Where-Object { $_.InstanceName -notin @('_total','idle') -and $_.CookedValue -gt 0 } |
+            Sort-Object CookedValue -Descending | Select-Object -First 1 -ExpandProperty InstanceName
+        # Remove sufixo "#N" que o Windows usa para distinguir instâncias duplicadas (ex: chrome#3 -> chrome)
+        if ($top) { $top -replace '#\d+$', '' }
+      register: passo5b_top_processo
+      failed_when: false
 
     - name: Definir variável do processo alvo
       ansible.builtin.set_fact:
-        top_ram_process: "{{ passo2b_top_processo.stdout | trim }}"
+        top_fault_process: "{{ (passo5b_top_processo.stdout | trim) if (passo5b_top_processo.stdout | trim) else 'System' }}"
 
-    # Passo 3 — Monitorizar crescimento de RAM do processo identificado acima (2 minutos)
-    # Adaptado do "while ($true)" original para um loop limitado (4 leituras de 30s = 2 min),
-    # já que um loop infinito nunca terminaria numa execução automatizada
-    - name: "Passo 3 - Monitorizar RAM do processo '{{ top_ram_process }}' (2 minutos)"
+    # Passo 6 — Monitorizar RAM/CPU do processo identificado acima (2 minutos)
+    - name: "Passo 6 - Monitorizar processo '{{ top_fault_process }}' (2 minutos)"
       ansible.windows.win_shell: |
         1..4 | ForEach-Object {
-            Get-Process -Name "{{ top_ram_process }}" -ErrorAction SilentlyContinue |
+            Get-Process -Name "{{ top_fault_process }}" -ErrorAction SilentlyContinue |
             Select-Object Name,
                 @{N="RAM(MB)";E={[math]::Round($_.WorkingSet/1MB,1)}},
                 CPU
             Start-Sleep -Seconds 30
         } | Format-Table -AutoSize | Out-String -Width 300
-      register: passo3_monitor_processo
+      register: passo6_monitor_processo
       failed_when: false
       async: 300
       poll: 30
 
-    - name: Mostrar resultado do Passo 3
+    - name: Mostrar resultado do Passo 6
       ansible.builtin.debug:
-        msg: "{{ passo3_monitor_processo.stdout_lines | default(['(sem output - verificar execução assíncrona)']) }}"
+        msg: "{{ passo6_monitor_processo.stdout_lines | default(['(sem output - verificar execução assíncrona)']) }}"
 
-    # Passo 4 — Diagnóstico específico do Kaspersky (avp)
-    - name: "Passo 4 - Estado atual do Kaspersky (avp)"
+    # Passo 7 — Diagnóstico específico do Kaspersky (avp)
+    - name: "Passo 7 - Estado atual do Kaspersky (avp)"
       ansible.windows.win_shell: |
         $proc = Get-Process avp -ErrorAction SilentlyContinue
         if ($proc) {
@@ -90,37 +152,38 @@
         } else {
             "Processo avp (Kaspersky) não encontrado em execução neste host."
         }
-      register: passo4_avp_estado
+      register: passo7_avp_estado
       failed_when: false
 
-    - name: Mostrar resultado do Passo 4 (estado)
+    - name: Mostrar resultado do Passo 7 (estado)
       ansible.builtin.debug:
-        msg: "{{ passo4_avp_estado.stdout_lines }}"
+        msg: "{{ passo7_avp_estado.stdout_lines }}"
 
-    # Passo 4b — Monitorizar avp por 2 minutos (só corre se o processo existir)
-    - name: "Passo 4 - Monitorizar avp por 2 minutos"
+    # Passo 7b — Monitorizar avp por 2 minutos (só corre se o processo existir)
+    - name: "Passo 7 - Monitorizar avp por 2 minutos"
       ansible.windows.win_shell: |
         $existe = Get-Process avp -ErrorAction SilentlyContinue
         if ($existe) {
-            1..4 | ForEach-Object {
+            $resultado = 1..4 | ForEach-Object {
                 Get-Process avp -ErrorAction SilentlyContinue |
                 Select-Object Name,
                     @{N="RAM(MB)";E={[math]::Round($_.WorkingSet/1MB,1)}},
                     CPU
                 Start-Sleep -Seconds 30
-            } | Format-Table -AutoSize | Out-String -Width 300
+            }
         } else {
-            "Processo avp não está em execução - monitorização ignorada."
+            $resultado = "Processo avp não está em execução - monitorização ignorada."
         }
-      register: passo4_avp_monitor
+        $resultado | Format-Table -AutoSize | Out-String -Width 300
+      register: passo7_avp_monitor
       failed_when: false
       async: 300
       poll: 30
-      when: "'não encontrado' not in passo4_avp_estado.stdout"
+      when: "'não encontrado' not in passo7_avp_estado.stdout"
 
-    - name: Mostrar resultado do Passo 4 (monitorização)
+    - name: Mostrar resultado do Passo 7 (monitorização)
       ansible.builtin.debug:
-        msg: "{{ passo4_avp_monitor.stdout_lines | default(['Monitorização do avp ignorada - processo não estava em execução.']) }}"
+        msg: "{{ passo7_avp_monitor.stdout_lines | default(['Monitorização do avp ignorada - processo não estava em execução.']) }}"
 
     # Consolidar tudo num relatório em memória
     - name: Gerar relatório consolidado
@@ -134,17 +197,26 @@
           --- PASSO 1: RAM total e disponível ---
           {{ passo1_ram_total.stdout | default('Sem dados') }}
 
-          --- PASSO 2: Top 10 processos por consumo de RAM ---
-          {{ passo2_top_ram.stdout | default('Sem dados') }}
+          --- PASSO 2: Pages/sec em tempo real (contador do alerta) ---
+          {{ passo2_pages_sec.stdout | default('Sem dados') }}
 
-          --- PASSO 3: Monitorização do processo '{{ top_ram_process }}' (2 min) ---
-          {{ passo3_monitor_processo.stdout | default('Sem dados') }}
+          --- PASSO 3: Ficheiro de paginação ---
+          {{ passo3_pagefile.stdout | default('Sem dados') }}
 
-          --- PASSO 4: Estado do Kaspersky (avp) ---
-          {{ passo4_avp_estado.stdout | default('Sem dados') }}
+          --- PASSO 4: Top 10 processos por RAM ---
+          {{ passo4_top_ram.stdout | default('Sem dados') }}
 
-          --- PASSO 4: Monitorização do avp (2 min) ---
-          {{ passo4_avp_monitor.stdout | default('Ignorado - avp não estava em execução') }}
+          --- PASSO 5: Top processos por Page Faults/sec ---
+          {{ passo5_page_faults.stdout | default('Sem dados') }}
+
+          --- PASSO 6: Monitorização do processo '{{ top_fault_process }}' (2 min) ---
+          {{ passo6_monitor_processo.stdout | default('Sem dados') }}
+
+          --- PASSO 7: Estado do Kaspersky (avp) ---
+          {{ passo7_avp_estado.stdout | default('Sem dados') }}
+
+          --- PASSO 7: Monitorização do avp (2 min) ---
+          {{ passo7_avp_monitor.stdout | default('Ignorado - avp não estava em execução') }}
 
     - name: Mostrar relatório final (para Semaphore/n8n)
       ansible.builtin.debug:

@@ -126,7 +126,7 @@
 
     - name: Mostrar resultado do Passo 5
       ansible.builtin.debug:
-        msg: "{{ passo5_page_faults.stdout | regex_replace('\\n?TOP_PROCESS_MARKER::.*', '') }}"
+        msg: "{{ passo5_page_faults.stdout_lines | default([]) | reject('match', '^TOP_PROCESS_MARKER::') | list }}"
 
     # Fallback: se o Page Faults/sec não devolver nada (ex: contadores indisponíveis),
     # usamos o processo com mais RAM (Passo 4) em vez de um valor fixo pouco útil
@@ -139,8 +139,8 @@
     - name: Definir variável do processo alvo
       ansible.builtin.set_fact:
         top_fault_process: >-
-          {% set marcador = passo5_page_faults.stdout | regex_search('TOP_PROCESS_MARKER::(.+)', '\\1') %}
-          {{ (marcador | first) if marcador else (passo5c_top_ram_processo.stdout | trim) }}
+          {%- set marcador = passo5_page_faults.stdout | regex_search('TOP_PROCESS_MARKER::(.+)', '\\1') -%}
+          {{ (marcador | first | trim) if marcador else (passo5c_top_ram_processo.stdout | trim) }}
 
     # Passo 6 — Monitorizar RAM/CPU do processo identificado acima (2 minutos)
     - name: "Passo 6 - Monitorizar processo '{{ top_fault_process }}' (2 minutos)"
@@ -226,7 +226,7 @@
           {{ passo4_top_ram.stdout | default('Sem dados') }}
 
           --- PASSO 5: Top processos por Page Faults/sec ---
-          {{ (passo5_page_faults.stdout | regex_replace('\n?TOP_PROCESS_MARKER::.*', '')) if passo5_page_faults.stdout else 'Sem dados' }}
+          {{ (passo5_page_faults.stdout | regex_replace('\r?\n?TOP_PROCESS_MARKER::.*', '')) if passo5_page_faults.stdout else 'Sem dados' }}
 
           --- PASSO 6: Monitorização do processo '{{ top_fault_process }}' (2 min) ---
           {{ passo6_monitor_processo.stdout | default('Sem dados') }}

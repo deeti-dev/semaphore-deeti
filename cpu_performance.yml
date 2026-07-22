@@ -1,1 +1,272 @@
+---
+# cpu_performance.yml
+# Diagnóstico de performance de CPU (modo kernel/privilegiado) em hosts Windows
+# Disparado via Semaphore, chamado pelo n8n quando a tag "playbook: cpu_performance" chega do Zabbix
+# (cobre alertas como "CPU Privileged Time Too High", "CPU interrupt time is too high",
+# "CPU queue length is too high")
+#
+# Uso:
+#   ansible-playbook cpu_performance.yml -e "target_host=PC-03"
+#
+# No Semaphore, configurar a Environment variable "target_host" (Variable Group "Webhook Vars")
+# para receber o host_name vindo do payload do Zabbix (via n8n).
+#
+# Nota de design: "CPU Privileged Time" mede tempo de CPU em modo KERNEL (drivers,
+# chamadas de sistema, interrupções), não CPU geral. Por isso, além do ranking normal de
+# CPU (contexto), identificamos também o processo com mais tempo em modo kernel
+# especificamente - mais próximo da causa real do alerta.
 
+- name: Diagnóstico de performance de CPU (kernel/privilegiado)
+  hosts: "{{ target_host }}"
+  gather_facts: no
+
+  tasks:
+
+    # Passo 1 — CPU total e privilegiada em tempo real (2 minutos)
+    - name: "Passo 1 - Monitorizar CPU total/kernel/user em tempo real (2 minutos)"
+      ansible.windows.win_shell: |
+        1..8 | ForEach-Object {
+            $cpu = Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor |
+                   Where-Object Name -eq "_Total"
+            [PSCustomObject]@{
+                Hora             = (Get-Date).ToString("HH:mm:ss")
+                "CPU Total (%)"  = $cpu.PercentProcessorTime
+                "CPU User (%)"   = $cpu.PercentUserTime
+                "CPU Kernel (%)" = $cpu.PercentPrivilegedTime
+                "Interrupts/sec" = $cpu.InterruptsPersec
+                "DPC (%)"        = $cpu.PercentDPCTime
+            }
+            Start-Sleep -Seconds 15
+        } | Format-Table -AutoSize | Out-String -Width 300
+      register: passo1_cpu_tempo_real
+      failed_when: false
+      async: 300
+      poll: 30
+
+    - name: Mostrar resultado do Passo 1
+      ansible.builtin.debug:
+        msg: "{{ passo1_cpu_tempo_real.stdout_lines | default(['(sem output - verificar execução assíncrona)']) }}"
+
+    # Passo 2 — Top processos por CPU total (contexto geral)
+    - name: "Passo 2 - Top 15 processos por CPU total"
+      ansible.windows.win_shell: |
+        Get-Process | Sort-Object CPU -Descending |
+        Select-Object -First 15 Name, Id, CPU,
+            @{N="RAM(MB)";E={[math]::Round($_.WorkingSet/1MB,1)}},
+            @{N="Uptime(h)";E={[math]::Round((New-TimeSpan $_.StartTime).TotalHours,1)}} |
+        Format-Table -AutoSize | Out-String -Width 300
+      register: passo2_top_cpu
+      failed_when: false
+
+    - name: Mostrar resultado do Passo 2
+      ansible.builtin.debug:
+        msg: "{{ passo2_top_cpu.stdout_lines | default(['Sem dados']) }}"
+
+    # Passo 2b — Top processos por CPU em modo KERNEL especificamente (mais próximo da causa real)
+    # O Passo 2 mostra CPU total (user + kernel misturados); aqui isolamos quem realmente
+    # gera tempo privilegiado - o que o alerta está de facto a medir.
+    # Excluímos WmiPrvSE/unsecapp/lsass porque o próprio playbook faz várias consultas WMI
+    # seguidas (Passo 1, 5, 6), o que "acorda" esses processos e infla os seus valores.
+    - name: "Passo 2b - Top processos por CPU em modo Kernel (Privileged Time)"
+      ansible.windows.win_shell: |
+        $procs = Get-CimInstance Win32_PerfFormattedData_PerfProc_Process |
+            Where-Object {
+                $_.Name -notin @('_Total','Idle') -and
+                $_.Name -notmatch '^(WmiPrvSE|unsecapp|lsass)' -and
+                $_.PercentPrivilegedTime -gt 0
+            } |
+            Sort-Object PercentPrivilegedTime -Descending | Select-Object -First 10 Name, PercentPrivilegedTime
+
+        $procs | Select-Object Name, @{N="Kernel(%)";E={$_.PercentPrivilegedTime}} |
+            Format-Table -AutoSize | Out-String -Width 300
+
+        if ($procs) {
+            # Marcador interno para o Ansible extrair o processo alvo - removido do relatório final
+            "TOP_PROCESS_MARKER::$($procs[0].Name -replace '#\d+$','')"
+        }
+      register: passo2b_kernel_procs
+      failed_when: false
+
+    - name: Mostrar resultado do Passo 2b
+      ansible.builtin.debug:
+        msg: "{{ passo2b_kernel_procs.stdout_lines | default([]) | reject('match', '^TOP_PROCESS_MARKER::') | list }}"
+
+    # Fallback: se o CPU Kernel não devolver nada, usamos o processo com mais CPU total (Passo 2)
+    - name: Identificar processo com mais CPU total (fallback caso Kernel Time falhe)
+      ansible.windows.win_shell: |
+        Get-Process | Sort-Object CPU -Descending | Select-Object -First 1 -ExpandProperty Name
+      register: passo2c_top_cpu_processo
+      failed_when: false
+
+    - name: Definir variável do processo alvo
+      ansible.builtin.set_fact:
+        top_kernel_process: >-
+          {%- set marcador = passo2b_kernel_procs.stdout | regex_search('TOP_PROCESS_MARKER::(.+)', '\\1') -%}
+          {{ (marcador | first | trim) if marcador else (passo2c_top_cpu_processo.stdout | trim) }}
+
+    # Passo 2c — Monitorizar RAM/CPU do processo identificado acima (2 minutos)
+    - name: "Passo 2c - Monitorizar processo '{{ top_kernel_process }}' (2 minutos)"
+      ansible.windows.win_shell: |
+        1..4 | ForEach-Object {
+            Get-Process -Name "{{ top_kernel_process }}" -ErrorAction SilentlyContinue |
+            Select-Object Name,
+                @{N="RAM(MB)";E={[math]::Round($_.WorkingSet/1MB,1)}},
+                CPU
+            Start-Sleep -Seconds 30
+        } | Format-Table -AutoSize | Out-String -Width 300
+      register: passo2d_monitor_processo
+      failed_when: false
+      async: 300
+      poll: 30
+
+    - name: Mostrar resultado do Passo 2c
+      ansible.builtin.debug:
+        msg: "{{ passo2d_monitor_processo.stdout_lines | default(['(sem output - verificar execução assíncrona)']) }}"
+
+    # Passo 3 — Interrupções de hardware (DPC/ISR)
+    - name: "Passo 3 - Interrupções de hardware (DPC/ISR)"
+      ansible.windows.win_shell: |
+        Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor |
+        Where-Object Name -eq "_Total" |
+        Select-Object Name, InterruptsPersec,
+            @{N="DPC(%)";E={$_.PercentDPCTime}},
+            @{N="Interrupt(%)";E={$_.PercentInterruptTime}},
+            @{N="Kernel(%)";E={$_.PercentPrivilegedTime}} |
+        Format-Table -AutoSize | Out-String -Width 300
+      register: passo3_interrupcoes
+      failed_when: false
+
+    - name: Mostrar resultado do Passo 3
+      ansible.builtin.debug:
+        msg: "{{ passo3_interrupcoes.stdout_lines | default(['Sem dados']) }}"
+
+    # Passo 4 — Erros de driver/hardware no Event Log (últimos 7 dias)
+    - name: "Passo 4 - Erros de driver/hardware nos últimos 7 dias"
+      ansible.windows.win_shell: |
+        Get-WinEvent -FilterHashtable @{
+            LogName   = 'System'
+            Level     = 2
+            StartTime = (Get-Date).AddDays(-7)
+        } | Where-Object {
+            $_.ProviderName -match 'disk|driver|storport|nvme|iastora|iaStorAV|ndis|tcpip|volmgr'
+        } |
+        Select-Object TimeCreated, ProviderName, Message |
+        Sort-Object TimeCreated -Descending |
+        Select-Object -First 20 |
+        Format-Table -AutoSize -Wrap | Out-String -Width 300
+      register: passo4_erros_driver
+      failed_when: false
+      # Pode não haver eventos no período - não deve quebrar o playbook
+
+    - name: Mostrar resultado do Passo 4
+      ansible.builtin.debug:
+        msg: "{{ passo4_erros_driver.stdout_lines | default(['Sem erros de driver/hardware nos últimos 7 dias']) }}"
+
+    # Passo 5 — Estado dos discos e fila de I/O (disco sob pressão é causa comum de kernel% alto)
+    - name: "Passo 5 - Estado dos discos e fila de I/O"
+      ansible.windows.win_shell: |
+        Get-CimInstance Win32_PerfFormattedData_PerfDisk_PhysicalDisk |
+        Where-Object Name -ne "_Total" |
+        Select-Object Name,
+            @{N="Leit ms";E={[math]::Round($_.AvgDiskSecPerRead*1000,1)}},
+            @{N="Escr ms";E={[math]::Round($_.AvgDiskSecPerWrite*1000,1)}},
+            @{N="Fila";E={$_.CurrentDiskQueueLength}},
+            @{N="% Ocupado";E={$_.PercentDiskTime}} |
+        Format-Table -AutoSize | Out-String -Width 300
+      register: passo5_disco_fila
+      failed_when: false
+
+    - name: Mostrar resultado do Passo 5
+      ansible.builtin.debug:
+        msg: "{{ passo5_disco_fila.stdout_lines | default(['Sem dados']) }}"
+
+    # Passo 6 — Drivers de kernel em execução
+    # Usamos Get-CimInstance em vez de Get-WmiObject (cmdlet legado/deprecated no PowerShell
+    # moderno) - mesma informação, mais consistente com o resto do playbook.
+    - name: "Passo 6 - Drivers de kernel em execução"
+      ansible.windows.win_shell: |
+        Get-CimInstance Win32_SystemDriver |
+        Where-Object State -eq 'Running' |
+        Select-Object Name, DisplayName, PathName |
+        Sort-Object Name |
+        Format-Table -AutoSize | Out-String -Width 300
+      register: passo6_drivers
+      failed_when: false
+
+    - name: Mostrar resultado do Passo 6
+      ansible.builtin.debug:
+        msg: "{{ passo6_drivers.stdout_lines | default(['Sem dados']) }}"
+
+    # Passo 7 — Verificar se Veeam ou Kaspersky são os causadores
+    - name: "Passo 7 - CPU do Veeam e do Kaspersky (avp)"
+      ansible.windows.win_shell: |
+        $veeam = Get-Process -Name "Veeam*" -ErrorAction SilentlyContinue
+        $avp   = Get-Process -Name "avp" -ErrorAction SilentlyContinue
+
+        Write-Output "--- Veeam ---"
+        if ($veeam) {
+            $veeam | Select-Object Name, Id, CPU,
+                @{N="RAM(MB)";E={[math]::Round($_.WorkingSet/1MB,1)}} |
+            Sort-Object CPU -Descending | Format-Table -AutoSize | Out-String -Width 300
+        } else {
+            "Nenhum processo Veeam em execução neste host."
+        }
+
+        Write-Output "--- Kaspersky (avp) ---"
+        if ($avp) {
+            $avp | Select-Object Name, Id, CPU,
+                @{N="RAM(MB)";E={[math]::Round($_.WorkingSet/1MB,1)}} |
+            Format-Table -AutoSize | Out-String -Width 300
+        } else {
+            "Processo avp não encontrado em execução neste host."
+        }
+      register: passo7_veeam_avp
+      failed_when: false
+
+    - name: Mostrar resultado do Passo 7
+      ansible.builtin.debug:
+        msg: "{{ passo7_veeam_avp.stdout_lines | default(['Sem dados']) }}"
+
+    # Consolidar tudo num relatório em memória
+    - name: Gerar relatório consolidado
+      ansible.builtin.set_fact:
+        full_report: |
+          ================================================================
+          DIAGNÓSTICO DE PERFORMANCE DE CPU (KERNEL) - {{ inventory_hostname }}
+          Data: {{ lookup('pipe', 'date') }}
+          ================================================================
+
+          --- PASSO 1: CPU total/kernel/user em tempo real (2 min) ---
+          {{ (passo1_cpu_tempo_real.stdout | trim) if passo1_cpu_tempo_real.stdout else 'Sem dados' }}
+
+          --- PASSO 2: Top 15 processos por CPU total ---
+          {{ (passo2_top_cpu.stdout | trim) if passo2_top_cpu.stdout else 'Sem dados' }}
+
+          --- PASSO 2b: Top processos por CPU em modo Kernel ---
+          {{ (passo2b_kernel_procs.stdout | regex_replace('\r?\n?TOP_PROCESS_MARKER::.*', '') | trim) if passo2b_kernel_procs.stdout else 'Sem dados' }}
+
+          --- PASSO 2c: Monitorização do processo '{{ top_kernel_process }}' (2 min) ---
+          {{ (passo2d_monitor_processo.stdout | trim) if passo2d_monitor_processo.stdout else 'Sem dados' }}
+
+          --- PASSO 3: Interrupções de hardware (DPC/ISR) ---
+          {{ (passo3_interrupcoes.stdout | trim) if passo3_interrupcoes.stdout else 'Sem dados' }}
+
+          --- PASSO 4: Erros de driver/hardware (7 dias) ---
+          {{ (passo4_erros_driver.stdout | trim) if passo4_erros_driver.stdout else 'Sem erros' }}
+
+          --- PASSO 5: Estado dos discos e fila de I/O ---
+          {{ (passo5_disco_fila.stdout | trim) if passo5_disco_fila.stdout else 'Sem dados' }}
+
+          --- PASSO 6: Drivers de kernel em execução ---
+          {{ (passo6_drivers.stdout | trim) if passo6_drivers.stdout else 'Sem dados' }}
+
+          --- PASSO 7: CPU do Veeam e do Kaspersky (avp) ---
+          {{ (passo7_veeam_avp.stdout | trim) if passo7_veeam_avp.stdout else 'Sem dados' }}
+
+    - name: Mostrar relatório final (para Semaphore/n8n)
+      ansible.builtin.debug:
+        msg: "{{ full_report }}"
+
+    - name: Retornar relatório como output do playbook
+      ansible.builtin.set_fact:
+        diagnostic_report: "{{ full_report }}"

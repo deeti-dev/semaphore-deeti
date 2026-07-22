@@ -22,12 +22,17 @@
 
   tasks:
 
-    # Passo 1 — CPU total e privilegiada em tempo real (2 minutos)
-    - name: "Passo 1 - Monitorizar CPU total/kernel/user em tempo real (2 minutos)"
+    # Passo 1 — CPU total, kernel e fila de processos em tempo real (2 minutos)
+    # Cobre os três alertas-alvo deste playbook:
+    #   - "CPU interrupt time is too high"   -> ver Interrupts/sec e DPC(%)
+    #   - "CPU Privileged Time Too High"     -> ver CPU Kernel(%)
+    #   - "CPU queue length is too high"     -> ver Fila (Processor Queue Length)
+    - name: "Passo 1 - Monitorizar CPU total/kernel/fila em tempo real (2 minutos)"
       ansible.windows.win_shell: |
         1..8 | ForEach-Object {
             $cpu = Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor |
                    Where-Object Name -eq "_Total"
+            $sys = Get-CimInstance Win32_PerfFormattedData_PerfOS_System
             [PSCustomObject]@{
                 Hora             = (Get-Date).ToString("HH:mm:ss")
                 "CPU Total (%)"  = $cpu.PercentProcessorTime
@@ -35,6 +40,7 @@
                 "CPU Kernel (%)" = $cpu.PercentPrivilegedTime
                 "Interrupts/sec" = $cpu.InterruptsPersec
                 "DPC (%)"        = $cpu.PercentDPCTime
+                "Fila (Queue)"   = $sys.ProcessorQueueLength
             }
             Start-Sleep -Seconds 15
         } | Format-Table -AutoSize | Out-String -Width 300

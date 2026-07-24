@@ -1,0 +1,99 @@
+---
+- name: Diagnóstico de Capacidade de Memória (Baixa RAM disponível)
+  hosts: "{{ target_host }}"
+  gather_facts: no
+  tasks:
+    # Passo 1 — Estado atual da RAM
+    - name: "Passo 1 - RAM Total, Livre e Usada"
+      ansible.windows.win_shell: |
+        Get-CimInstance Win32_OperatingSystem |
+        Select-Object TotalVisibleMemorySize, FreePhysicalMemory |
+        ForEach-Object {
+            [PSCustomObject]@{
+                "RAM Total (GB)"   = [math]::Round($_.TotalVisibleMemorySize / 1MB, 2)
+                "RAM Livre (GB)"   = [math]::Round($_.FreePhysicalMemory / 1MB, 2)
+                "RAM Usada (GB)"   = [math]::Round(($_.TotalVisibleMemorySize - $_.FreePhysicalMemory) / 1MB, 2)
+                "RAM Usada (%)"    = [math]::Round((1 - $_.FreePhysicalMemory / $_.TotalVisibleMemorySize) * 100, 1)
+            }
+        } | Format-Table -AutoSize | Out-String -Width 300
+      register: passo1_ram_atual
+
+    - name: Mostrar Passo 1
+      ansible.builtin.debug:
+        msg: "{{ passo1_ram_atual.stdout_lines }}"
+
+    # Passo 2 — Top processos por consumo de RAM (o principal culpado)
+    - name: "Passo 2 - Top 15 processos por consumo de RAM"
+      ansible.windows.win_shell: |
+        Get-Process | Sort-Object WorkingSet -Descending |
+        Select-Object -First 15 Name, Id,
+            @{N="RAM(MB)";E={[math]::Round($_.WorkingSet/1MB,1)}},
+            CPU,
+            @{N="Uptime(h)";E={[math]::Round(((Get-Date) - $_.StartTime).TotalHours,1)}} |
+        Format-Table -AutoSize | Out-String -Width 300
+      register: passo2_top_ram
+
+    - name: Mostrar Passo 2
+      ansible.builtin.debug:
+        msg: "{{ passo2_top_ram.stdout_lines }}"
+
+    # Passo 3 — Serviços que mais consomem RAM
+    - name: "Passo 3 - Serviços com maior consumo de RAM"
+      ansible.windows.win_shell: |
+        Get-CimInstance Win32_Service | 
+        Where-Object State -eq 'Running' |
+        Select-Object Name, DisplayName, ProcessId |
+        ForEach-Object {
+            $proc = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue
+            if ($proc) {
+                [PSCustomObject]@{
+                    Service     = $_.Name
+                    DisplayName = $_.DisplayName
+                    "RAM(MB)"   = [math]::Round($proc.WorkingSet/1MB,1)
+                }
+            }
+        } | Sort-Object "RAM(MB)" -Descending | Select-Object -First 10 |
+        Format-Table -AutoSize | Out-String -Width 300
+      register: passo3_servicos
+      failed_when: false
+
+    - name: Mostrar Passo 3
+      ansible.builtin.debug:
+        msg: "{{ passo3_servicos.stdout_lines | default('Sem dados de serviços') }}"
+
+    # Passo 4 — Ficheiro de paginação (se estiver muito usado, é sinal de pressão)
+    - name: "Passo 4 - Estado do ficheiro de paginação"
+      ansible.windows.win_shell: |
+        Get-CimInstance Win32_PageFileUsage |
+        Select-Object Name,
+            @{N="Alocado(MB)";E={$_.AllocatedBaseSize}},
+            @{N="Atual(MB)";E={$_.CurrentUsage}},
+            @{N="Pico(MB)";E={$_.PeakUsage}} |
+        Format-Table -AutoSize | Out-String -Width 300
+      register: passo4_pagefile
+      failed_when: false
+
+    # Consolidar relatório
+    - name: Gerar relatório consolidado
+      ansible.builtin.set_fact:
+        full_report: |
+          ================================================================
+          DIAGNÓSTICO DE CAPACIDADE DE MEMÓRIA - {{ inventory_hostname }}
+          Data: {{ lookup('pipe', 'date') }}
+          ================================================================
+          --- PASSO 1: RAM atual ---
+          {{ passo1_ram_atual.stdout | default('Sem dados') }}
+          --- PASSO 2: Top processos por RAM ---
+          {{ passo2_top_ram.stdout | default('Sem dados') }}
+          --- PASSO 3: Serviços com maior consumo ---
+          {{ passo3_servicos.stdout | default('Sem dados') }}
+          --- PASSO 4: Ficheiro de paginação ---
+          {{ passo4_pagefile.stdout | default('Sem ficheiro de paginação') }}
+
+    - name: Mostrar relatório final
+      ansible.builtin.debug:
+        msg: "{{ full_report }}"
+
+    - name: Retornar relatório para n8n/Semaphore
+      ansible.builtin.set_fact:
+        diagnostic_report: "{{ full_report }}"

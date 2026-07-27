@@ -1,0 +1,145 @@
+---
+# cpu_capacity.yml
+# Diagnóstico de capacidade/utilização geral de CPU em hosts Windows
+# Disparado via Semaphore, chamado pelo n8n quando a tag "playbook: cpu_capacity" chega do Zabbix
+# (cobre alertas como "High CPU utilization")
+#
+# Diferença face ao cpu_performance.yml: este playbook foca-se em UTILIZAÇÃO GERAL
+# (quem está a consumir CPU, uso sustentado) - não em métricas de modo KERNEL
+# (interrupts, privileged time, queue length), que são tratadas no cpu_performance.yml.
+#
+# Uso:
+#   ansible-playbook cpu_capacity.yml -e "target_host=INACOM-NUC-08"
+#
+# No Semaphore, configurar a Environment variable "target_host" (Variable Group "Webhook Vars")
+# para receber o host_name vindo do payload do Zabbix (via n8n).
+
+- name: Diagnóstico de Capacidade de CPU (Utilização Geral)
+  hosts: "{{ target_host }}"
+  gather_facts: no
+
+  tasks:
+
+    # Passo 1 — CPU atual e informação do processador (contexto)
+    # O número de núcleos lógicos é importante para interpretar os valores: um único
+    # processo "preso" a um core pode gerar ~ (1/núcleos)*100% de uso total, sem que
+    # o sistema esteja de facto sobrecarregado.
+    - name: "Passo 1 - CPU total atual e informação do processador"
+      ansible.windows.win_shell: |
+        $cpu = Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor | Where-Object Name -eq "_Total"
+        $proc = Get-CimInstance Win32_Processor | Select-Object -First 1
+
+        [PSCustomObject]@{
+            "CPU Total Agora (%)" = $cpu.PercentProcessorTime
+            "Modelo"               = $proc.Name
+            "Núcleos Físicos"      = $proc.NumberOfCores
+            "Núcleos Lógicos"      = $proc.NumberOfLogicalProcessors
+            "Velocidade (MHz)"     = $proc.CurrentClockSpeed
+        } | Format-List | Out-String -Width 300
+      register: passo1_cpu_info
+      failed_when: false
+
+    - name: Mostrar Passo 1
+      ansible.builtin.debug:
+        msg: "{{ passo1_cpu_info.stdout_lines | default(['Sem dados']) }}"
+
+    # Passo 2 — Top processos por CPU ATUAL (não cumulativo)
+    # Usamos Win32_PerfFormattedData_PerfProc_Process em vez de "Get-Process | Sort CPU",
+    # porque a propriedade CPU do Get-Process é tempo acumulado desde o arranque do processo
+    # (segundos totais) - um processo aberto há dias parece "alto" mesmo sem estar a
+    # consumir nada agora. O contador CIM reflete o uso neste preciso momento.
+    - name: "Passo 2 - Top 15 processos por CPU atual (%)"
+      ansible.windows.win_shell: |
+        Get-CimInstance Win32_PerfFormattedData_PerfProc_Process |
+            Where-Object { $_.Name -notin @('_Total','Idle') -and $_.PercentProcessorTime -gt 0 } |
+            Sort-Object PercentProcessorTime -Descending | Select-Object -First 15 Name, IDProcess,
+                @{N="CPU Atual(%)";E={$_.PercentProcessorTime}},
+                @{N="RAM(MB)";E={[math]::Round($_.WorkingSet/1MB,1)}} |
+        Format-Table -AutoSize | Out-String -Width 300
+      register: passo2_top_cpu
+      failed_when: false
+
+    - name: Mostrar Passo 2
+      ansible.builtin.debug:
+        msg: "{{ passo2_top_cpu.stdout_lines | default(['Sem dados']) }}"
+
+    # Passo 3 — Serviços que mais consomem CPU
+    # Nota: um único processo (ex: svchost.exe) hospeda vários serviços, por isso é normal
+    # ver o mesmo processo repetido várias vezes aqui - cada linha é um serviço, não um processo.
+    - name: "Passo 3 - Serviços com maior consumo de CPU"
+      ansible.windows.win_shell: |
+        $cpuProcs = Get-CimInstance Win32_PerfFormattedData_PerfProc_Process |
+            Where-Object { $_.Name -notin @('_Total','Idle') } |
+            Group-Object IDProcess -AsHashTable -AsString
+
+        Get-CimInstance Win32_Service |
+        Where-Object State -eq 'Running' |
+        Select-Object Name, DisplayName, ProcessId |
+        ForEach-Object {
+            $p = $cpuProcs["$($_.ProcessId)"]
+            if ($p) {
+                [PSCustomObject]@{
+                    Service     = $_.Name
+                    DisplayName = $_.DisplayName
+                    "CPU Atual(%)" = $p.PercentProcessorTime
+                }
+            }
+        } | Where-Object { $_.'CPU Atual(%)' -gt 0 } |
+        Sort-Object "CPU Atual(%)" -Descending | Select-Object -First 10 |
+        Format-Table -AutoSize | Out-String -Width 300
+      register: passo3_servicos_cpu
+      failed_when: false
+
+    - name: Mostrar Passo 3
+      ansible.builtin.debug:
+        msg: "{{ passo3_servicos_cpu.stdout_lines | default(['Sem serviços com CPU ativo no momento']) }}"
+
+    # Passo 4 — Monitorizar CPU total em tempo real (2 minutos)
+    # Confirma se o uso alto é sustentado (problema real) ou um pico pontual (ruído/falso alarme)
+    - name: "Passo 4 - Monitorizar CPU total em tempo real (2 minutos)"
+      ansible.windows.win_shell: |
+        1..8 | ForEach-Object {
+            $cpu = Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor | Where-Object Name -eq "_Total"
+            [PSCustomObject]@{
+                Hora            = (Get-Date).ToString("HH:mm:ss")
+                "CPU Total (%)" = $cpu.PercentProcessorTime
+            }
+            Start-Sleep -Seconds 15
+        } | Format-Table -AutoSize | Out-String -Width 300
+      register: passo4_cpu_tempo_real
+      failed_when: false
+      async: 300
+      poll: 30
+
+    - name: Mostrar Passo 4
+      ansible.builtin.debug:
+        msg: "{{ passo4_cpu_tempo_real.stdout_lines | default(['(sem output - verificar execução assíncrona)']) }}"
+
+    # Consolidar relatório
+    - name: Gerar relatório consolidado
+      ansible.builtin.set_fact:
+        full_report: |
+          ================================================================
+          DIAGNÓSTICO DE CAPACIDADE DE CPU - {{ inventory_hostname }}
+          Data: {{ lookup('pipe', 'date') }}
+          ================================================================
+
+          --- PASSO 1: CPU atual e informação do processador ---
+          {{ (passo1_cpu_info.stdout | trim) if passo1_cpu_info.stdout else 'Sem dados' }}
+
+          --- PASSO 2: Top processos por CPU atual ---
+          {{ (passo2_top_cpu.stdout | trim) if passo2_top_cpu.stdout else 'Sem dados' }}
+
+          --- PASSO 3: Serviços com maior consumo de CPU ---
+          {{ (passo3_servicos_cpu.stdout | trim) if passo3_servicos_cpu.stdout else 'Sem dados' }}
+
+          --- PASSO 4: CPU total em tempo real (2 min, confirma se é sustentado) ---
+          {{ (passo4_cpu_tempo_real.stdout | trim) if passo4_cpu_tempo_real.stdout else 'Sem dados' }}
+
+    - name: Mostrar relatório final
+      ansible.builtin.debug:
+        msg: "{{ full_report }}"
+
+    - name: Retornar relatório para n8n/Semaphore
+      ansible.builtin.set_fact:
+        diagnostic_report: "{{ full_report }}"

@@ -1,8 +1,26 @@
 ---
+# memory_capacity.yml
+# Diagnóstico de capacidade de memória (baixa RAM disponível) em hosts Windows
+# Disparado via Semaphore, chamado pelo n8n quando a tag "playbook: memory_capacity" chega do Zabbix
+# (cobre alertas como "High memory utilization", "High swap space usage",
+# "Number of free system page table entries is too low")
+#
+# Diferença face ao memory_performance.yml: este playbook foca-se em CAPACIDADE
+# (quanta RAM está disponível, quem a está a ocupar) - não em PAGINAÇÃO/performance
+# (Pages/sec, page faults), que é tratada no memory_performance.yml.
+#
+# Uso:
+#   ansible-playbook memory_capacity.yml -e "target_host=INACOM-NUC-08"
+#
+# No Semaphore, configurar a Environment variable "target_host" (Variable Group "Webhook Vars")
+# para receber o host_name vindo do payload do Zabbix (via n8n).
+
 - name: Diagnóstico de Capacidade de Memória (Baixa RAM disponível)
   hosts: "{{ target_host }}"
   gather_facts: no
+
   tasks:
+
     # Passo 1 — Estado atual da RAM
     - name: "Passo 1 - RAM Total, Livre e Usada"
       ansible.windows.win_shell: |
@@ -10,17 +28,18 @@
         Select-Object TotalVisibleMemorySize, FreePhysicalMemory |
         ForEach-Object {
             [PSCustomObject]@{
-                "RAM Total (GB)"   = [math]::Round($_.TotalVisibleMemorySize / 1MB, 2)
-                "RAM Livre (GB)"   = [math]::Round($_.FreePhysicalMemory / 1MB, 2)
-                "RAM Usada (GB)"   = [math]::Round(($_.TotalVisibleMemorySize - $_.FreePhysicalMemory) / 1MB, 2)
-                "RAM Usada (%)"    = [math]::Round((1 - $_.FreePhysicalMemory / $_.TotalVisibleMemorySize) * 100, 1)
+                "RAM Total (GB)" = [math]::Round($_.TotalVisibleMemorySize / 1MB, 2)
+                "RAM Livre (GB)" = [math]::Round($_.FreePhysicalMemory / 1MB, 2)
+                "RAM Usada (GB)" = [math]::Round(($_.TotalVisibleMemorySize - $_.FreePhysicalMemory) / 1MB, 2)
+                "RAM Usada (%)"  = [math]::Round((1 - $_.FreePhysicalMemory / $_.TotalVisibleMemorySize) * 100, 1)
             }
         } | Format-Table -AutoSize | Out-String -Width 300
       register: passo1_ram_atual
+      failed_when: false
 
     - name: Mostrar Passo 1
       ansible.builtin.debug:
-        msg: "{{ passo1_ram_atual.stdout_lines }}"
+        msg: "{{ passo1_ram_atual.stdout_lines | default(['Sem dados']) }}"
 
     # Passo 2 — Top processos por consumo de RAM (o principal culpado)
     - name: "Passo 2 - Top 15 processos por consumo de RAM"
@@ -32,15 +51,18 @@
             @{N="Uptime(h)";E={[math]::Round(((Get-Date) - $_.StartTime).TotalHours,1)}} |
         Format-Table -AutoSize | Out-String -Width 300
       register: passo2_top_ram
+      failed_when: false
 
     - name: Mostrar Passo 2
       ansible.builtin.debug:
-        msg: "{{ passo2_top_ram.stdout_lines }}"
+        msg: "{{ passo2_top_ram.stdout_lines | default(['Sem dados']) }}"
 
     # Passo 3 — Serviços que mais consomem RAM
+    # Nota: um único processo (ex: svchost.exe) hospeda vários serviços, por isso é normal
+    # ver o mesmo processo repetido várias vezes aqui - cada linha é um serviço, não um processo.
     - name: "Passo 3 - Serviços com maior consumo de RAM"
       ansible.windows.win_shell: |
-        Get-CimInstance Win32_Service | 
+        Get-CimInstance Win32_Service |
         Where-Object State -eq 'Running' |
         Select-Object Name, DisplayName, ProcessId |
         ForEach-Object {
@@ -59,9 +81,9 @@
 
     - name: Mostrar Passo 3
       ansible.builtin.debug:
-        msg: "{{ passo3_servicos.stdout_lines | default('Sem dados de serviços') }}"
+        msg: "{{ passo3_servicos.stdout_lines | default(['Sem dados de serviços']) }}"
 
-    # Passo 4 — Ficheiro de paginação (se estiver muito usado, é sinal de pressão)
+    # Passo 4 — Ficheiro de paginação (se estiver muito usado, é sinal de pressão de capacidade)
     - name: "Passo 4 - Estado do ficheiro de paginação"
       ansible.windows.win_shell: |
         Get-CimInstance Win32_PageFileUsage |
@@ -73,6 +95,10 @@
       register: passo4_pagefile
       failed_when: false
 
+    - name: Mostrar Passo 4
+      ansible.builtin.debug:
+        msg: "{{ passo4_pagefile.stdout_lines | default(['Sem ficheiro de paginação configurado']) }}"
+
     # Consolidar relatório
     - name: Gerar relatório consolidado
       ansible.builtin.set_fact:
@@ -81,14 +107,18 @@
           DIAGNÓSTICO DE CAPACIDADE DE MEMÓRIA - {{ inventory_hostname }}
           Data: {{ lookup('pipe', 'date') }}
           ================================================================
+
           --- PASSO 1: RAM atual ---
-          {{ passo1_ram_atual.stdout | default('Sem dados') }}
+          {{ (passo1_ram_atual.stdout | trim) if passo1_ram_atual.stdout else 'Sem dados' }}
+
           --- PASSO 2: Top processos por RAM ---
-          {{ passo2_top_ram.stdout | default('Sem dados') }}
+          {{ (passo2_top_ram.stdout | trim) if passo2_top_ram.stdout else 'Sem dados' }}
+
           --- PASSO 3: Serviços com maior consumo ---
-          {{ passo3_servicos.stdout | default('Sem dados') }}
+          {{ (passo3_servicos.stdout | trim) if passo3_servicos.stdout else 'Sem dados' }}
+
           --- PASSO 4: Ficheiro de paginação ---
-          {{ passo4_pagefile.stdout | default('Sem ficheiro de paginação') }}
+          {{ (passo4_pagefile.stdout | trim) if passo4_pagefile.stdout else 'Sem ficheiro de paginação' }}
 
     - name: Mostrar relatório final
       ansible.builtin.debug:

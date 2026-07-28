@@ -1,6 +1,6 @@
 ---
 - name: Desligar workstations com uptime superior a 24 horas
-  hosts: windows
+  hosts: todos
   gather_facts: false
 
   tasks:

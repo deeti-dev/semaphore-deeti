@@ -2,6 +2,7 @@
 - name: Desligar workstations com uptime superior a 24 horas
   hosts: todos
   gather_facts: false
+  ignore_unreachable: yes
 
   tasks:
     - name: Executar script PowerShell
@@ -17,13 +18,23 @@
               exit $Code
           }
 
-          $OS = Get-CimInstance Win32_OperatingSystem
+          try {
+              $OS = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+          }
+          catch {
+              Exit-Script 0 "Não foi possível obter informações do sistema."
+          }
 
           if ($OS.ProductType -ne 1) {
               Exit-Script 0 "Servidor detectado. Ignorado."
           }
 
-          $Computer = Get-CimInstance Win32_ComputerSystem
+          try {
+              $Computer = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+          }
+          catch {
+              Exit-Script 0 "Não foi possível obter informações do computador."
+          }
 
           if (-not $Computer.PartOfDomain) {
               Exit-Script 0 "Computador fora do domínio."
@@ -49,13 +60,16 @@
 
           try {
               msg * "Este computador será desligado dentro de 10 minutos."
-          } catch {}
+          }
+          catch {}
 
           shutdown.exe /s /f /t $ShutdownDelay /c "Desligamento automático"
 
           Exit-Script 0 "Shutdown agendado."
 
       register: resultado
+      failed_when: false
 
-    - debug:
+    - name: Mostrar resultado
+      debug:
         var: resultado.output

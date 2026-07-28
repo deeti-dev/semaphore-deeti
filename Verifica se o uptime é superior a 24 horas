@@ -1,0 +1,95 @@
+# =====================================================================
+# Shutdown automático - INACOM
+# Apenas Workstations do domínio inacom.local
+# Executado pelo Ansible
+# =====================================================================
+
+# Configuração
+$DomainName = "inacom.local"
+$MaxUptimeHours = 24
+$ShutdownDelay = 600    # 10 minutos
+
+function Exit-Script {
+    param (
+        [int]$Code,
+        [string]$Message
+    )
+
+    Write-Output $Message
+    exit $Code
+}
+
+# ---------------------------------------------------------------------
+# Verificar Sistema Operativo
+# ProductType:
+# 1 = Workstation
+# 2 = Domain Controller
+# 3 = Server
+# ---------------------------------------------------------------------
+
+$OS = Get-CimInstance Win32_OperatingSystem
+
+if ($OS.ProductType -ne 1) {
+    Exit-Script 0 "Servidor detectado ($($OS.Caption)). Script ignorado."
+}
+
+# ---------------------------------------------------------------------
+# Verificar se pertence ao domínio INACOM
+# ---------------------------------------------------------------------
+
+$Computer = Get-CimInstance Win32_ComputerSystem
+
+if (-not $Computer.PartOfDomain) {
+    Exit-Script 0 "Computador não pertence a um domínio."
+}
+
+if ($Computer.Domain.ToLower() -ne $DomainName.ToLower()) {
+    Exit-Script 0 "Computador pertence ao domínio '$($Computer.Domain)' e não ao domínio '$DomainName'."
+}
+
+# ---------------------------------------------------------------------
+# Verificar ligação ativa à rede do domínio
+# ---------------------------------------------------------------------
+
+$DomainNetwork = Get-NetConnectionProfile |
+    Where-Object { $_.NetworkCategory -eq 'DomainAuthenticated' }
+
+if (-not $DomainNetwork) {
+    Exit-Script 0 "Computador não está ligado à rede corporativa ($DomainName)."
+}
+
+# ---------------------------------------------------------------------
+# Calcular Uptime
+# ---------------------------------------------------------------------
+
+$BootTime = $OS.LastBootUpTime
+$Uptime = (Get-Date) - $BootTime
+$Hours = [math]::Round($Uptime.TotalHours,2)
+
+Write-Output "Computador: $env:COMPUTERNAME"
+Write-Output "Domínio: $($Computer.Domain)"
+Write-Output "Sistema Operativo: $($OS.Caption)"
+Write-Output "Uptime: $Hours horas"
+
+if ($Hours -lt $MaxUptimeHours) {
+    Exit-Script 0 "Uptime inferior a $MaxUptimeHours horas. Nenhuma ação necessária."
+}
+
+# ---------------------------------------------------------------------
+# Aviso ao utilizador
+# ---------------------------------------------------------------------
+
+try {
+    msg * "ATENÇÃO: Este computador encontra-se ligado há mais de 24 horas.`n`nSerá desligado automaticamente dentro de 10 minutos.`nGuarde o seu trabalho."
+}
+catch {
+    Write-Output "Nenhum utilizador interativo encontrado."
+}
+
+# ---------------------------------------------------------------------
+# Agendar desligamento
+# ---------------------------------------------------------------------
+
+shutdown.exe /s /f /t $ShutdownDelay /c "Desligamento automático por política de TI - INACOM"
+
+Exit-Script 0 "Shutdown agendado para $ShutdownDelay segundos."

@@ -1,0 +1,169 @@
+---
+# service_recovery.yml
+# Diagnóstico + remediação automática de um serviço Windows que parou inesperadamente
+# Disparado via Semaphore, chamado pelo n8n quando a tag "playbook: service_recovery" chega do Zabbix
+#
+# Diferente dos outros playbooks: além de diagnosticar, este TENTA REINICIAR o serviço
+# e confirma o estado final. Não reinicia serviços com StartMode=Disabled (assume que
+# foi desativado propositadamente) - só reporta essa situação.
+#
+# Requer DUAS variáveis dinâmicas (não só target_host):
+#   - target_host    -> o host onde o serviço parou (já usado nos outros playbooks)
+#   - target_service -> o nome exato do serviço Windows (ex: "Spooler", "MSSQLSERVER")
+#
+# Uso:
+#   ansible-playbook service_recovery.yml -e "target_host=INACOM-NUC-08" -e "target_service=Spooler"
+#
+# No Semaphore, adicionar "target_service" ao Variable Group "Webhook Vars" (Environment
+# variable, tal como target_host). O n8n precisa de extrair o nome do serviço do evento do
+# Zabbix (via tag dedicada, ex: tag "service") e incluí-lo no JSON "environment" ao criar
+# a task na API do Semaphore - ver nota no fim da resposta.
+
+- name: Diagnóstico e Recuperação de Serviço Parado
+  hosts: "{{ target_host }}"
+  gather_facts: no
+
+  tasks:
+
+    # Passo 1 — Estado atual do serviço
+    - name: "Passo 1 - Estado atual do serviço '{{ target_service }}'"
+      ansible.windows.win_shell: |
+        $svc = Get-CimInstance Win32_Service -Filter "Name='{{ target_service }}'" -ErrorAction SilentlyContinue
+        if ($svc) {
+            $svc | Select-Object Name, DisplayName, State, Status, StartMode, StartName, PathName |
+            Format-List | Out-String -Width 300
+        } else {
+            "Serviço '{{ target_service }}' não encontrado neste host."
+        }
+      register: passo1_estado_atual
+      failed_when: false
+
+    - name: Mostrar Passo 1
+      ansible.builtin.debug:
+        msg: "{{ passo1_estado_atual.stdout_lines | default(['Sem dados']) }}"
+
+    # Passo 2 — Diagnóstico: eventos do Service Control Manager relacionados (últimos 2 dias)
+    # EventID 7034/7031 = falha inesperada; 7036 = mudanças de estado; 7009/7000 = timeout ao iniciar
+    - name: "Passo 2 - Eventos do Service Control Manager (últimos 2 dias)"
+      ansible.windows.win_shell: |
+        Get-WinEvent -FilterHashtable @{
+            LogName      = 'System'
+            ProviderName = 'Service Control Manager'
+            StartTime    = (Get-Date).AddDays(-2)
+        } -ErrorAction SilentlyContinue |
+        Where-Object { $_.Message -match [regex]::Escape("{{ target_service }}") } |
+        Select-Object TimeCreated, Id, Message |
+        Sort-Object TimeCreated -Descending | Select-Object -First 15 |
+        Format-Table -AutoSize -Wrap | Out-String -Width 300
+      register: passo2_eventos
+      failed_when: false
+
+    - name: Mostrar Passo 2
+      ansible.builtin.debug:
+        msg: "{{ passo2_eventos.stdout_lines | default(['Sem eventos relacionados encontrados']) }}"
+
+    # Passo 3 — Dependências (uma dependência em baixo é causa comum de falha ao arrancar)
+    - name: "Passo 3 - Dependências do serviço"
+      ansible.windows.win_shell: |
+        $svc = Get-Service -Name "{{ target_service }}" -ErrorAction SilentlyContinue
+        if ($svc) {
+            "Serviços requeridos (dependências):"
+            $svc.ServicesDependedOn | Select-Object Name, Status | Format-Table -AutoSize | Out-String -Width 300
+            "Serviços que dependem deste:"
+            $svc.DependentServices | Select-Object Name, Status | Format-Table -AutoSize | Out-String -Width 300
+        } else {
+            "Serviço não encontrado."
+        }
+      register: passo3_dependencias
+      failed_when: false
+
+    - name: Mostrar Passo 3
+      ansible.builtin.debug:
+        msg: "{{ passo3_dependencias.stdout_lines | default(['Sem dados']) }}"
+
+    # Passo 4 — Tentar reiniciar o serviço (só se não estiver Disabled nem já a correr)
+    - name: "Passo 4 - Tentar reiniciar o serviço"
+      ansible.windows.win_shell: |
+        $svc = Get-CimInstance Win32_Service -Filter "Name='{{ target_service }}'" -ErrorAction SilentlyContinue
+
+        if (-not $svc) {
+            "Serviço não encontrado - não é possível reiniciar."
+        }
+        elseif ($svc.StartMode -eq 'Disabled') {
+            "Serviço está DESATIVADO (StartMode=Disabled) - não foi reiniciado automaticamente. Requer decisão manual (pode ter sido desativado propositadamente)."
+        }
+        elseif ($svc.State -eq 'Running') {
+            "Serviço já estava em execução - nenhuma ação necessária."
+        }
+        else {
+            try {
+                Start-Service -Name "{{ target_service }}" -ErrorAction Stop
+                "Comando de arranque enviado com sucesso."
+            } catch {
+                "Falha ao tentar iniciar o serviço: $($_.Exception.Message)"
+            }
+        }
+      register: passo4_restart
+      failed_when: false
+
+    - name: Mostrar Passo 4
+      ansible.builtin.debug:
+        msg: "{{ passo4_restart.stdout_lines | default(['Sem dados']) }}"
+
+    # Passo 5 — Aguardar e confirmar o estado final (alguns serviços demoram a arrancar)
+    - name: "Passo 5 - Confirmar estado final (após aguardar)"
+      ansible.windows.win_shell: |
+        Start-Sleep -Seconds 10
+        $svc = Get-CimInstance Win32_Service -Filter "Name='{{ target_service }}'" -ErrorAction SilentlyContinue
+        if ($svc) {
+            $svc | Select-Object Name, State, Status, StartMode | Format-Table -AutoSize | Out-String -Width 300
+        } else {
+            "Serviço não encontrado ao verificar estado final."
+        }
+      register: passo5_estado_final
+      failed_when: false
+
+    - name: Mostrar Passo 5
+      ansible.builtin.debug:
+        msg: "{{ passo5_estado_final.stdout_lines | default(['Sem dados']) }}"
+
+    # Determinar resultado final de forma explícita (fácil de ler no relatório/Telegram/IA)
+    - name: Determinar resultado da recuperação
+      ansible.builtin.set_fact:
+        resultado_final: >-
+          {{ '✅ RECUPERADO - serviço em execução' if ('Running' in (passo5_estado_final.stdout | default(''))) else '❌ NÃO RECUPERADO - serviço não está em execução (ver Passo 4 para o motivo)' }}
+
+    # Consolidar relatório
+    - name: Gerar relatório consolidado
+      ansible.builtin.set_fact:
+        full_report: |
+          ================================================================
+          DIAGNÓSTICO E RECUPERAÇÃO DE SERVIÇO - {{ inventory_hostname }}
+          Serviço: {{ target_service }}
+          Data: {{ lookup('pipe', 'date') }}
+          ================================================================
+
+          RESULTADO: {{ resultado_final }}
+
+          --- PASSO 1: Estado inicial do serviço ---
+          {{ (passo1_estado_atual.stdout | trim) if passo1_estado_atual.stdout else 'Sem dados' }}
+
+          --- PASSO 2: Eventos do Service Control Manager (2 dias) ---
+          {{ (passo2_eventos.stdout | trim) if passo2_eventos.stdout else 'Sem eventos encontrados' }}
+
+          --- PASSO 3: Dependências ---
+          {{ (passo3_dependencias.stdout | trim) if passo3_dependencias.stdout else 'Sem dados' }}
+
+          --- PASSO 4: Tentativa de reinício ---
+          {{ (passo4_restart.stdout | trim) if passo4_restart.stdout else 'Sem dados' }}
+
+          --- PASSO 5: Estado final ---
+          {{ (passo5_estado_final.stdout | trim) if passo5_estado_final.stdout else 'Sem dados' }}
+
+    - name: Mostrar relatório final
+      ansible.builtin.debug:
+        msg: "{{ full_report }}"
+
+    - name: Retornar relatório para n8n/Semaphore
+      ansible.builtin.set_fact:
+        diagnostic_report: "{{ full_report }}"

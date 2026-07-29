@@ -1,0 +1,145 @@
+---
+# network_performance.yml
+# Diagnóstico de performance/qualidade de rede em hosts Windows
+# Disparado via Semaphore, chamado pelo n8n quando a tag "playbook: network_performance" chega do Zabbix
+# (cobre alertas como "High bandwidth usage", "High error rate")
+#
+# Diferença face ao network_capacity.yml: este playbook foca-se em QUALIDADE da ligação
+# (erros, pacotes descartados, latência, saturação sustentada) - não em mudanças de
+# velocidade negociada da interface, que são tratadas no network_capacity.yml.
+#
+# Uso:
+#   ansible-playbook network_performance.yml -e "target_host=INACOM-DRHTI-03"
+#
+# No Semaphore, configurar a Environment variable "target_host" (Variable Group "Webhook Vars")
+# para receber o host_name vindo do payload do Zabbix (via n8n).
+
+- name: Diagnóstico de Performance de Rede (Erros/Latência/Saturação)
+  hosts: "{{ target_host }}"
+  gather_facts: no
+
+  tasks:
+
+    # Passo 1 — Erros e pacotes descartados por interface (indicador direto de "High error rate")
+    - name: "Passo 1 - Erros e descartes por interface"
+      ansible.windows.win_shell: |
+        Get-NetAdapterStatistics -ErrorAction SilentlyContinue |
+        Select-Object Name, OutboundPacketErrors, ReceivedPacketErrors,
+            OutboundDiscardedPackets, ReceivedDiscardedPackets |
+        Format-Table -AutoSize | Out-String -Width 300
+      register: passo1_erros_interface
+      failed_when: false
+
+    - name: Mostrar Passo 1
+      ansible.builtin.debug:
+        msg: "{{ passo1_erros_interface.stdout_lines | default(['Sem dados']) }}"
+
+    # Passo 2 — Monitorizar erros/descartes e débito em tempo real (2 minutos)
+    - name: "Passo 2 - Monitorizar erros e débito em tempo real (2 minutos)"
+      ansible.windows.win_shell: |
+        1..8 | ForEach-Object {
+            Get-CimInstance Win32_PerfFormattedData_Tcpip_NetworkInterface |
+                Where-Object { $_.Name -notmatch 'Loopback|isatap|Teredo' -and $_.CurrentBandwidth -gt 0 } |
+                Select-Object @{N="Hora";E={(Get-Date).ToString("HH:mm:ss")}},
+                    Name,
+                    @{N="Pacotes/seg";E={$_.PacketsPersec}},
+                    @{N="Erros Rx";E={$_.PacketsReceivedErrors}},
+                    @{N="Erros Tx";E={$_.PacketsOutboundErrors}},
+                    @{N="Descartes Rx";E={$_.PacketsReceivedDiscarded}},
+                    @{N="Descartes Tx";E={$_.PacketsOutboundDiscarded}},
+                    @{N="Uso(%)";E={[math]::Round((($_.BytesTotalPersec*8)/$_.CurrentBandwidth)*100,2)}}
+            Start-Sleep -Seconds 15
+        } | Format-Table -AutoSize | Out-String -Width 300
+      register: passo2_tempo_real
+      failed_when: false
+      async: 300
+      poll: 30
+
+    - name: Mostrar Passo 2
+      ansible.builtin.debug:
+        msg: "{{ passo2_tempo_real.stdout_lines | default(['(sem output - verificar execução assíncrona)']) }}"
+
+    # Passo 3 — Latência e perda de pacotes (gateway, DNS, e um destino externo de referência)
+    - name: "Passo 3 - Latência e perda de pacotes"
+      ansible.windows.win_shell: |
+        $gateway = (Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue |
+                    Select-Object -First 1 -ExpandProperty NextHop)
+        $dns = (Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                Where-Object { $_.ServerAddresses } | Select-Object -First 1 -ExpandProperty ServerAddresses)
+
+        $alvos = @{
+            "Gateway ($gateway)" = $gateway
+            "DNS ($dns)"         = $dns
+            "Externo (1.1.1.1)"  = "1.1.1.1"
+        }
+
+        $alvos.GetEnumerator() | Where-Object { $_.Value } | ForEach-Object {
+            $r = Test-Connection -ComputerName $_.Value -Count 4 -ErrorAction SilentlyContinue
+            if ($r) {
+                [PSCustomObject]@{
+                    Destino          = $_.Key
+                    "Perda(%)"       = [math]::Round((4 - $r.Count) / 4 * 100, 0)
+                    "Latência Media(ms)" = [math]::Round(($r | Measure-Object ResponseTime -Average).Average, 1)
+                    "Latência Max(ms)"   = ($r | Measure-Object ResponseTime -Maximum).Maximum
+                }
+            } else {
+                [PSCustomObject]@{
+                    Destino = $_.Key; "Perda(%)" = 100; "Latência Media(ms)" = "N/A"; "Latência Max(ms)" = "N/A"
+                }
+            }
+        } | Format-Table -AutoSize | Out-String -Width 300
+      register: passo3_latencia
+      failed_when: false
+
+    - name: Mostrar Passo 3
+      ansible.builtin.debug:
+        msg: "{{ passo3_latencia.stdout_lines | default(['Sem dados de latência']) }}"
+
+    # Passo 4 — Configuração de velocidade/duplex (mismatch é causa comum de erros de rede)
+    - name: "Passo 4 - Configuração de velocidade/duplex das interfaces"
+      ansible.windows.win_shell: |
+        Get-NetAdapter -Physical -ErrorAction SilentlyContinue | ForEach-Object {
+            $adapter = $_
+            $duplex = Get-NetAdapterAdvancedProperty -Name $adapter.Name -ErrorAction SilentlyContinue |
+                      Where-Object { $_.DisplayName -match "Speed|Duplex" }
+            [PSCustomObject]@{
+                Interface       = $adapter.Name
+                "Link Atual"    = $adapter.LinkSpeed
+                "Config Speed/Duplex" = ($duplex | Select-Object -First 1 -ExpandProperty DisplayValue)
+            }
+        } | Format-Table -AutoSize | Out-String -Width 300
+      register: passo4_duplex
+      failed_when: false
+
+    - name: Mostrar Passo 4
+      ansible.builtin.debug:
+        msg: "{{ passo4_duplex.stdout_lines | default(['Sem dados']) }}"
+
+    # Consolidar relatório
+    - name: Gerar relatório consolidado
+      ansible.builtin.set_fact:
+        full_report: |
+          ================================================================
+          DIAGNÓSTICO DE PERFORMANCE DE REDE - {{ inventory_hostname }}
+          Data: {{ lookup('pipe', 'date') }}
+          ================================================================
+
+          --- PASSO 1: Erros e descartes por interface ---
+          {{ (passo1_erros_interface.stdout | trim) if passo1_erros_interface.stdout else 'Sem dados' }}
+
+          --- PASSO 2: Erros/débito em tempo real (2 min) ---
+          {{ (passo2_tempo_real.stdout | trim) if passo2_tempo_real.stdout else 'Sem dados' }}
+
+          --- PASSO 3: Latência e perda de pacotes ---
+          {{ (passo3_latencia.stdout | trim) if passo3_latencia.stdout else 'Sem dados' }}
+
+          --- PASSO 4: Configuração velocidade/duplex ---
+          {{ (passo4_duplex.stdout | trim) if passo4_duplex.stdout else 'Sem dados' }}
+
+    - name: Mostrar relatório final
+      ansible.builtin.debug:
+        msg: "{{ full_report }}"
+
+    - name: Retornar relatório para n8n/Semaphore
+      ansible.builtin.set_fact:
+        diagnostic_report: "{{ full_report }}"

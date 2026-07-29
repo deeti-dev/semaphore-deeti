@@ -1,1 +1,189 @@
+---
+# disk_capacity.yml
+# Diagnóstico de capacidade de disco (espaço baixo/crítico) em hosts Windows
+# Disparado via Semaphore, chamado pelo n8n quando a tag "playbook: disk_capacity" chega do Zabbix
+# (cobre alertas como "Disk space is low", "Disk space is critically low")
+#
+# Diferença face ao disk_performance.yml: este playbook foca-se em CAPACIDADE
+# (onde está o espaço a ser gasto, o que se pode libertar) - não em PERFORMANCE
+# (latência, fila de I/O), que é tratada no disk_performance.yml.
+#
+# Nota: este playbook percorre o sistema de ficheiros (pastas, perfis, ficheiros grandes),
+# por isso pode demorar mais que os outros - usa async generosamente para não falhar
+# por timeout de WinRM.
+#
+# Uso:
+#   ansible-playbook disk_capacity.yml -e "target_host=INACOM-DAFSG-14"
+#
+# No Semaphore, configurar a Environment variable "target_host" (Variable Group "Webhook Vars")
+# para receber o host_name vindo do payload do Zabbix (via n8n).
 
+- name: Diagnóstico de Capacidade de Disco (Espaço Baixo)
+  hosts: "{{ target_host }}"
+  gather_facts: no
+
+  tasks:
+
+    # Passo 1 — Espaço em disco atual (todos os drives com conteúdo)
+    - name: "Passo 1 - Espaço em disco atual"
+      ansible.windows.win_shell: |
+        $drives = Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue |
+                  Where-Object { $_.Used + $_.Free -gt 0 }
+
+        if ($drives) {
+            $resultado = $drives | Select-Object Name,
+                @{N="Total(GB)";E={[math]::Round(($_.Used + $_.Free)/1GB,1)}},
+                @{N="Usado(GB)";E={[math]::Round($_.Used/1GB,1)}},
+                @{N="Livre(GB)";E={[math]::Round($_.Free/1GB,1)}},
+                @{N="Livre(%)";E={
+                    if ($_.Used + $_.Free -gt 0) {
+                        [math]::Round($_.Free / ($_.Used + $_.Free) * 100, 1)
+                    } else { 0 }
+                }}
+        } else {
+            $resultado = "Nenhum drive encontrado com espaço."
+        }
+        $resultado | Format-Table -AutoSize | Out-String -Width 300
+      register: passo1_espaco_disco
+      failed_when: false
+      changed_when: false
+
+    - name: Mostrar Passo 1
+      ansible.builtin.debug:
+        msg: "{{ passo1_espaco_disco.stdout_lines | default(['Sem dados']) }}"
+
+    # Passo 2 — Maiores pastas de primeiro nível em C:\ (onde está a ir o espaço)
+    - name: "Passo 2 - Maiores pastas em C:\\ (top 10)"
+      ansible.windows.win_shell: |
+        Get-ChildItem -Path "C:\" -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
+            $size = (Get-ChildItem -Path $_.FullName -Recurse -File -Force -ErrorAction SilentlyContinue |
+                     Measure-Object -Property Length -Sum).Sum
+            [PSCustomObject]@{
+                Pasta          = $_.FullName
+                "Tamanho(GB)"  = [math]::Round($size/1GB,2)
+            }
+        } | Sort-Object "Tamanho(GB)" -Descending | Select-Object -First 10 |
+        Format-Table -AutoSize | Out-String -Width 300
+      register: passo2_maiores_pastas
+      failed_when: false
+      async: 300
+      poll: 30
+
+    - name: Mostrar Passo 2
+      ansible.builtin.debug:
+        msg: "{{ passo2_maiores_pastas.stdout_lines | default(['(sem output - verificar execução assíncrona)']) }}"
+
+    # Passo 3 — Tamanho por perfil de utilizador (útil em máquinas partilhadas)
+    - name: "Passo 3 - Tamanho por perfil de utilizador"
+      ansible.windows.win_shell: |
+        Get-ChildItem "C:\Users" -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
+            $size = (Get-ChildItem $_.FullName -Recurse -File -Force -ErrorAction SilentlyContinue |
+                     Measure-Object -Property Length -Sum).Sum
+            [PSCustomObject]@{
+                Utilizador    = $_.Name
+                "Tamanho(GB)" = [math]::Round($size/1GB,2)
+            }
+        } | Sort-Object "Tamanho(GB)" -Descending |
+        Format-Table -AutoSize | Out-String -Width 300
+      register: passo3_perfis_utilizador
+      failed_when: false
+      async: 300
+      poll: 30
+
+    - name: Mostrar Passo 3
+      ansible.builtin.debug:
+        msg: "{{ passo3_perfis_utilizador.stdout_lines | default(['(sem output - verificar execução assíncrona)']) }}"
+
+    # Passo 4 — Temporários e cache comuns (vitórias rápidas para libertar espaço)
+    - name: "Passo 4 - Temporários e cache (Windows Update, Temp, Reciclagem)"
+      ansible.windows.win_shell: |
+        $alvos = @(
+            "C:\Windows\Temp",
+            "C:\Windows\SoftwareDistribution\Download",
+            "C:\`$Recycle.Bin"
+        )
+        $alvos += (Get-ChildItem "C:\Users" -Directory -Force -ErrorAction SilentlyContinue |
+                   ForEach-Object { "$($_.FullName)\AppData\Local\Temp" })
+
+        $alvos | Where-Object { Test-Path $_ } | ForEach-Object {
+            $size = (Get-ChildItem $_ -Recurse -File -Force -ErrorAction SilentlyContinue |
+                     Measure-Object -Property Length -Sum).Sum
+            [PSCustomObject]@{
+                Pasta         = $_
+                "Tamanho(MB)" = [math]::Round($size/1MB,1)
+            }
+        } | Sort-Object "Tamanho(MB)" -Descending |
+        Format-Table -AutoSize | Out-String -Width 300
+      register: passo4_temporarios
+      failed_when: false
+      async: 300
+      poll: 30
+
+    - name: Mostrar Passo 4
+      ansible.builtin.debug:
+        msg: "{{ passo4_temporarios.stdout_lines | default(['(sem output - verificar execução assíncrona)']) }}"
+
+    # Passo 5 — Componente store do Windows (WinSxS) - offensor comum em sistemas antigos
+    - name: "Passo 5 - Tamanho do componente store (WinSxS)"
+      ansible.windows.win_shell: |
+        Dism /online /Cleanup-Image /AnalyzeComponentStore
+      register: passo5_winsxs
+      failed_when: false
+      async: 300
+      poll: 30
+
+    - name: Mostrar Passo 5
+      ansible.builtin.debug:
+        msg: "{{ passo5_winsxs.stdout_lines | default(['Sem dados do componente store']) }}"
+
+    # Passo 6 — Ficheiros individuais grandes (>1GB) em pastas de utilizador/dados
+    - name: "Passo 6 - Ficheiros individuais maiores que 1GB"
+      ansible.windows.win_shell: |
+        Get-ChildItem -Path "C:\Users","C:\ProgramData" -Recurse -File -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Length -gt 1GB } |
+        Sort-Object Length -Descending | Select-Object -First 10 FullName,
+            @{N="Tamanho(GB)";E={[math]::Round($_.Length/1GB,2)}} |
+        Format-Table -AutoSize -Wrap | Out-String -Width 300
+      register: passo6_ficheiros_grandes
+      failed_when: false
+      async: 300
+      poll: 30
+
+    - name: Mostrar Passo 6
+      ansible.builtin.debug:
+        msg: "{{ passo6_ficheiros_grandes.stdout_lines | default(['Nenhum ficheiro individual acima de 1GB encontrado']) }}"
+
+    # Consolidar relatório
+    - name: Gerar relatório consolidado
+      ansible.builtin.set_fact:
+        full_report: |
+          ================================================================
+          DIAGNÓSTICO DE CAPACIDADE DE DISCO - {{ inventory_hostname }}
+          Data: {{ lookup('pipe', 'date') }}
+          ================================================================
+
+          --- PASSO 1: Espaço em disco atual ---
+          {{ (passo1_espaco_disco.stdout | trim) if passo1_espaco_disco.stdout else 'Sem dados' }}
+
+          --- PASSO 2: Maiores pastas em C:\ ---
+          {{ (passo2_maiores_pastas.stdout | trim) if passo2_maiores_pastas.stdout else 'Sem dados' }}
+
+          --- PASSO 3: Tamanho por perfil de utilizador ---
+          {{ (passo3_perfis_utilizador.stdout | trim) if passo3_perfis_utilizador.stdout else 'Sem dados' }}
+
+          --- PASSO 4: Temporários e cache ---
+          {{ (passo4_temporarios.stdout | trim) if passo4_temporarios.stdout else 'Sem dados' }}
+
+          --- PASSO 5: Componente store (WinSxS) ---
+          {{ (passo5_winsxs.stdout | trim) if passo5_winsxs.stdout else 'Sem dados' }}
+
+          --- PASSO 6: Ficheiros individuais > 1GB ---
+          {{ (passo6_ficheiros_grandes.stdout | trim) if passo6_ficheiros_grandes.stdout else 'Nenhum encontrado' }}
+
+    - name: Mostrar relatório final
+      ansible.builtin.debug:
+        msg: "{{ full_report }}"
+
+    - name: Retornar relatório para n8n/Semaphore
+      ansible.builtin.set_fact:
+        diagnostic_report: "{{ full_report }}"

@@ -55,7 +55,7 @@
     # Passo 2 — Maiores pastas de primeiro nível em C:\ (onde está a ir o espaço)
     - name: "Passo 2 - Maiores pastas em C:\\ (top 10)"
       ansible.windows.win_shell: |
-        Get-ChildItem -Path 'C:\' -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
+        Get-ChildItem -Path C:\ -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
             $size = (Get-ChildItem -Path $_.FullName -Recurse -File -Force -ErrorAction SilentlyContinue |
                      Measure-Object -Property Length -Sum).Sum
             [PSCustomObject]@{
@@ -76,7 +76,7 @@
     # Passo 3 — Tamanho por perfil de utilizador (útil em máquinas partilhadas)
     - name: "Passo 3 - Tamanho por perfil de utilizador"
       ansible.windows.win_shell: |
-        Get-ChildItem 'C:\Users' -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
+        Get-ChildItem C:\Users -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
             $size = (Get-ChildItem $_.FullName -Recurse -File -Force -ErrorAction SilentlyContinue |
                      Measure-Object -Property Length -Sum).Sum
             [PSCustomObject]@{
@@ -98,9 +98,9 @@
     - name: "Passo 4 - Temporários e cache (Windows Update, Temp, Reciclagem)"
       ansible.windows.win_shell: |
         $alvos = @(
-            'C:\Windows\Temp',
-            'C:\Windows\SoftwareDistribution\Download',
-            'C:\`$Recycle.Bin'
+            C:\Windows\Temp,
+            C:\Windows\SoftwareDistribution\Download,
+            C:\`$Recycle.Bin
         )
         $alvos += (Get-ChildItem "C:\Users" -Directory -Force -ErrorAction SilentlyContinue |
                    ForEach-Object { "$($_.FullName)\AppData\Local\Temp" })
@@ -139,7 +139,7 @@
     # Passo 6 — Ficheiros individuais grandes (>1GB) em pastas de utilizador/dados
     - name: "Passo 6 - Ficheiros individuais maiores que 1GB"
       ansible.windows.win_shell: |
-        Get-ChildItem -Path 'C:\Users','C:\ProgramData' -Recurse -File -Force -ErrorAction SilentlyContinue |
+        Get-ChildItem -Path C:\Users,C:\ProgramData -Recurse -File -Force -ErrorAction SilentlyContinue |
         Where-Object { $_.Length -gt 1GB } |
         Sort-Object Length -Descending | Select-Object -First 10 FullName,
             @{N="Tamanho(GB)";E={[math]::Round($_.Length/1GB,2)}} |

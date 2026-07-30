@@ -24,6 +24,27 @@
 
   tasks:
 
+    # Passo 0 — Utilizador logado na máquina
+    - name: Passo 0 - Utilizador logado
+      ansible.windows.win_shell: |
+        $cs = Get-CimInstance -ClassName Win32_ComputerSystem
+        $logged = $cs.UserName
+
+        if ($logged) {
+            [PSCustomObject]@{
+                "Utilizador Logado" = $logged
+                "Hostname"          = $env:COMPUTERNAME
+            } | Format-List | Out-String
+        } else {
+            "Nenhum utilizador interativo detetado (pode ser sessão de serviço ou máquina sem login)."
+        }
+
+        # Sessões ativas (quser)
+        Write-Output "`n--- Sessões ativas (quser) ---"
+        quser 2>$null
+      register: passo0_utilizador
+      failed_when: false
+
     # Passo 1 — Espaço em disco atual (todos os drives com conteúdo)
     - name: "Passo 1 - Espaço em disco atual"
       ansible.windows.win_shell: |
@@ -162,6 +183,9 @@
           Data: {{ lookup('pipe', 'date') }}
           ================================================================
 
+          --- UTILIZADOR LOGADO ---
+          {{ (passo0_utilizador.stdout | trim) if passo0_utilizador.stdout else 'Sem informação' }}
+          
           --- PASSO 1: Espaço em disco atual ---
           {{ (passo1_espaco_disco.stdout | trim) if passo1_espaco_disco.stdout else 'Sem dados' }}
 

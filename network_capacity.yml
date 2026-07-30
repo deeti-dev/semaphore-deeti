@@ -27,6 +27,27 @@
 
   tasks:
 
+    # Passo 0 — Utilizador logado na máquina
+    - name: Passo 0 - Utilizador logado
+      ansible.windows.win_shell: |
+        $cs = Get-CimInstance -ClassName Win32_ComputerSystem
+        $logged = $cs.UserName
+
+        if ($logged) {
+            [PSCustomObject]@{
+                "Utilizador Logado" = $logged
+                "Hostname"          = $env:COMPUTERNAME
+            } | Format-List | Out-String
+        } else {
+            "Nenhum utilizador interativo detetado (pode ser sessão de serviço ou máquina sem login)."
+        }
+
+        # Sessões ativas (quser)
+        Write-Output "`n--- Sessões ativas (quser) ---"
+        quser 2>$null
+      register: passo0_utilizador
+      failed_when: false
+
     # Passo 1 — Estado atual de todas as interfaces físicas
     - name: "Passo 1 - Estado das interfaces de rede"
       ansible.windows.win_shell: |
@@ -111,6 +132,9 @@
           DIAGNÓSTICO DE CAPACIDADE DE REDE - {{ inventory_hostname }}
           Data: {{ lookup('pipe', 'date') }}
           ================================================================
+
+          --- UTILIZADOR LOGADO ---
+          {{ (passo0_utilizador.stdout | trim) if passo0_utilizador.stdout else 'Sem informação' }}
 
           --- PASSO 1: Estado das interfaces ---
           {{ (passo1_interfaces.stdout | trim) if passo1_interfaces.stdout else 'Sem dados' }}

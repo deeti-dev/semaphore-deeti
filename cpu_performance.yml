@@ -22,6 +22,27 @@
 
   tasks:
 
+    # Passo 0 — Utilizador logado na máquina
+    - name: Passo 0 - Utilizador logado
+      ansible.windows.win_shell: |
+        $cs = Get-CimInstance -ClassName Win32_ComputerSystem
+        $logged = $cs.UserName
+
+        if ($logged) {
+            [PSCustomObject]@{
+                "Utilizador Logado" = $logged
+                "Hostname"          = $env:COMPUTERNAME
+            } | Format-List | Out-String
+        } else {
+            "Nenhum utilizador interativo detetado (pode ser sessão de serviço ou máquina sem login)."
+        }
+
+        # Sessões ativas (quser)
+        Write-Output "`n--- Sessões ativas (quser) ---"
+        quser 2>$null
+      register: passo0_utilizador
+      failed_when: false
+
     # Passo 1 — CPU total, kernel e fila de processos em tempo real (2 minutos)
     # Cobre os três alertas-alvo deste playbook:
     #   - "CPU interrupt time is too high"   -> ver Interrupts/sec e DPC(%)
@@ -241,6 +262,9 @@
           DIAGNÓSTICO DE PERFORMANCE DE CPU (KERNEL) - {{ inventory_hostname }}
           Data: {{ lookup('pipe', 'date') }}
           ================================================================
+
+          --- UTILIZADOR LOGADO ---
+          {{ (passo0_utilizador.stdout | trim) if passo0_utilizador.stdout else 'Sem informação' }}
 
           --- PASSO 1: CPU total/kernel/user em tempo real (2 min) ---
           {{ (passo1_cpu_tempo_real.stdout | trim) if passo1_cpu_tempo_real.stdout else 'Sem dados' }}

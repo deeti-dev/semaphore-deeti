@@ -25,7 +25,8 @@
       ansible.windows.win_shell: |
         $cs = Get-CimInstance -ClassName Win32_ComputerSystem
         $logged = $cs.UserName
-
+        $quserOutput = quser 2>$null
+ 
         if ($logged) {
             [PSCustomObject]@{
                 "Utilizador Logado" = $logged
@@ -34,10 +35,28 @@
         } else {
             "Nenhum utilizador interativo detetado (pode ser sessão de serviço ou máquina sem login)."
         }
-
-        # Sessões ativas (quser)
+ 
         Write-Output "`n--- Sessões ativas (quser) ---"
-        quser 2>$null
+        if ($quserOutput) { $quserOutput } else { "Sem sessões ativas detetadas." }
+ 
+        # Determinar o valor mais fiável para o marcador:
+        # 1º sessão de consola (Win32_ComputerSystem.UserName)
+        # 2º primeira sessão ativa do quser (cobre RDP)
+        # 3º "sem utilizador"
+        $marcador = $null
+        if ($logged) {
+            $marcador = $logged
+        } elseif ($quserOutput) {
+            $primeiraLinha = $quserOutput | Select-Object -Skip 1 -First 1
+            if ($primeiraLinha) {
+                $marcador = ($primeiraLinha.Trim() -split '\s{2,}')[0].TrimStart('>')
+            }
+        }
+        if (-not $marcador) { $marcador = "Nenhum utilizador com sessao ativa" }
+ 
+        # Marcador interno para o n8n extrair de forma simples e fiável (removido do
+        # relatório final antes de chegar ao Telegram/GLPI)
+        "`nLOGGED_USER_MARKER::$marcador"
       register: passo0_utilizador
       failed_when: false
 
@@ -146,7 +165,7 @@
           ================================================================
 
           --- UTILIZADOR LOGADO ---
-          {{ (passo0_utilizador.stdout | trim) if passo0_utilizador.stdout else 'Sem informação' }}
+          {{ (passo0_utilizador.stdout | regex_replace('\r?\n?LOGGED_USER_MARKER::.*', '') | trim) if passo0_utilizador.stdout else 'Sem informação' }}
 
           --- PASSO 1: Erros e descartes por interface ---
           {{ (passo1_erros_interface.stdout | trim) if passo1_erros_interface.stdout else 'Sem dados' }}

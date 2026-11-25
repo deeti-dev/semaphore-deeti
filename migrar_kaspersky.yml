@@ -1,6 +1,6 @@
 ---
 - name: Migrar agentes Kaspersky para o novo Servidor de Administração
-  hosts: windows
+  hosts: todos
   gather_facts: false
 
   vars:

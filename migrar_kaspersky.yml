@@ -1,0 +1,118 @@
+---
+- name: Migrar agentes Kaspersky para o novo Servidor de Administração
+  hosts: windows
+  gather_facts: false
+
+  vars:
+    kaspersky_server: "10.186.103.31"
+    kaspersky_ssl_port: 13000
+    kaspersky_agent_paths:
+      - 'C:\Program Files (x86)\Kaspersky Lab\NetworkAgent'
+      - 'C:\Program Files\Kaspersky Lab\NetworkAgent'
+    kaspersky_log: 'C:\Windows\Temp\klmover-migration.log'
+
+  tasks:
+    - name: Verificar conectividade com o novo servidor Kaspersky
+      ansible.windows.win_powershell:
+        script: |
+          $server = "{{ kaspersky_server }}"
+          $port = {{ kaspersky_ssl_port }}
+          $result = Test-NetConnection -ComputerName $server -Port $port -WarningAction SilentlyContinue
+          if (-not $result.TcpTestSucceeded) {
+            throw "Não foi possível ligar a $server na porta TCP $port."
+          }
+          Write-Output "Conectividade TCP $server`:$port OK."
+
+    - name: Localizar os utilitários Kaspersky
+      ansible.windows.win_powershell:
+        script: |
+          $folders = @(
+          {% for path in kaspersky_agent_paths %}
+            '{{ path }}'
+          {% endfor %}
+          )
+
+          $base = $folders | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $base) {
+            throw "Pasta do Kaspersky Network Agent não encontrada."
+          }
+
+          $klmover = Join-Path $base 'klmover.exe'
+          $klnagchk = Join-Path $base 'klnagchk.exe'
+
+          if (-not (Test-Path $klmover)) {
+            throw "klmover.exe não encontrado em $base"
+          }
+          if (-not (Test-Path $klnagchk)) {
+            throw "klnagchk.exe não encontrado em $base"
+          }
+
+          $Ansible.Changed = $false
+          $Ansible.Result = @{
+            AgentDirectory = $base
+            Klmover = $klmover
+            Klnagchk = $klnagchk
+          }
+      register: kaspersky_tools
+
+    - name: Alterar o endereço do Servidor de Administração
+      ansible.windows.win_powershell:
+        script: |
+          $klmover = '{{ kaspersky_tools.result.Klmover }}'
+          $log = '{{ kaspersky_log }}'
+          if (Test-Path $log) { Remove-Item $log -Force }
+
+          & $klmover -address '{{ kaspersky_server }}' -logfile $log
+
+          if (-not (Test-Path $log)) {
+            throw "O klmover não criou o log: $log"
+          }
+
+          $logContent = Get-Content $log -Raw
+          if ($logContent -notmatch 'Operation has completed successfully') {
+            throw "O klmover não confirmou sucesso. Log: $logContent"
+          }
+
+          $Ansible.Changed = $true
+          Write-Output $logContent
+      register: kaspersky_move
+
+    - name: Verificar a configuração e a ligação do Network Agent
+      ansible.windows.win_powershell:
+        script: |
+          $klnagchk = '{{ kaspersky_tools.result.Klnagchk }}'
+          $output = & $klnagchk 2>&1 | Out-String
+
+          Write-Output $output
+
+          if ($output -notmatch [regex]::Escape("Administration Server address: '{{ kaspersky_server }}'")) {
+            throw "O Network Agent não apresenta o novo endereço {{ kaspersky_server }}."
+          }
+          if ($output -notmatch 'Attempting to connect to Administration Server\.\.\.OK') {
+            throw "Falha na ligação ao Servidor de Administração."
+          }
+          if ($output -notmatch 'Network Agent is running') {
+            throw "O Network Agent não está em execução."
+          }
+
+          $Ansible.Changed = $false
+      register: kaspersky_check
+
+    - name: Forçar sincronização imediata com o novo servidor
+      ansible.windows.win_powershell:
+        script: |
+          $klnagchk = '{{ kaspersky_tools.result.Klnagchk }}'
+          $output = & $klnagchk -sendhb 2>&1 | Out-String
+          Write-Output $output
+          $Ansible.Changed = $false
+      register: kaspersky_heartbeat
+
+    - name: Apresentar resumo da migração
+      ansible.builtin.debug:
+        msg:
+          - "Host: {{ inventory_hostname }}"
+          - "Novo Servidor Kaspersky: {{ kaspersky_server }}"
+          - "Porta SSL: {{ kaspersky_ssl_port }}"
+          - "klmover: concluído"
+          - "Diagnóstico: ligação OK"
+          - "Sincronização imediata: comando enviado"
